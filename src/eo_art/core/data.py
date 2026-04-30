@@ -13,10 +13,15 @@ if TYPE_CHECKING:
     from ..render3d.scene import Scene3D
 
 
-def _detect_kind(ds: xr.Dataset) -> Literal["raster", "timeseries", "dem", "vector"]:
+def _detect_kind(ds: xr.Dataset) -> Literal["raster", "timeseries", "dem"]:
+    if not ds.data_vars:
+        from .errors import EODataLoadError
+        raise EODataLoadError("Dataset contains no data variables.")
     first_var = next(iter(ds.data_vars.values()))
     if "time" in first_var.dims:
         return "timeseries"
+    # Default 2 when no band dim: a (y,x) array without band is treated as raster, not dem.
+    # To load a (y,x) DEM, use kind="dem" explicitly via from_xarray.
     if first_var.sizes.get("band", 2) == 1 and np.issubdtype(first_var.dtype, np.floating):
         return "dem"
     return "raster"
@@ -27,7 +32,7 @@ class EOData:
     ds: xr.Dataset
     crs: str
     resolution: float
-    kind: Literal["raster", "timeseries", "dem", "vector"]
+    kind: Literal["raster", "timeseries", "dem"]
 
     @classmethod
     def from_xarray(cls, ds: xr.Dataset, crs: str, resolution: float = 1.0) -> EOData:
@@ -48,5 +53,6 @@ class EOData:
         return compute_hillshade(self, azimuth=azimuth, altitude=altitude)
 
     def scene3d(self, dem: EOData | None = None) -> Scene3D:
+        # Pass self as dem when called on a DEM EOData; use .drape() to add raster texture.
         from ..render3d.scene import Scene3D
         return Scene3D(dem=dem if dem is not None else self)

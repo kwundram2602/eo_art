@@ -1,6 +1,6 @@
 class EODataLoadError(Exception):
-    pass
+    """Raised when EO data cannot be loaded or is structurally invalid."""
 
 
 class CRSMissingError(EODataLoadError):
-    pass
+    """Raised when loaded data has no coordinate reference system."""
