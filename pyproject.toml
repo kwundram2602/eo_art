@@ -19,9 +19,6 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
-[tool.uv.sources]
-vecraspy = { path = "../vecraspy", editable = true }
-
 [project.optional-dependencies]
 hillshade = ["xarray-spatial>=0.3.0"]
 stac      = ["pystac-client>=0.8.0", "planetary-computer>=1.0.0"]
@@ -67,3 +64,6 @@ dev = [
 
 [tool.ty]
 src = ["src"]
+
+[tool.uv.sources]
+vecraspy = { git = "https://github.com/kwundram2602/vecraspy.git" }

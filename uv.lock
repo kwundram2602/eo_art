@@ -806,7 +806,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'neural'", specifier = ">=2.0" },
     { name = "torchvision", marker = "extra == 'neural'", specifier = ">=0.15" },
     { name = "trimesh", marker = "extra == '3d'", specifier = ">=4.4.0" },
-    { name = "vecraspy", editable = "../vecraspy" },
+    { name = "vecraspy", git = "https://github.com/kwundram2602/vecraspy.git" },
     { name = "xarray", specifier = ">=2024.1.0" },
     { name = "xarray-spatial", marker = "extra == 'hillshade'", specifier = ">=0.3.0" },
 ]
@@ -2932,7 +2932,7 @@ wheels = [
 [[package]]
 name = "vecraspy"
 version = "0.1.0"
-source = { editable = "../vecraspy" }
+source = { git = "https://github.com/kwundram2602/vecraspy.git#cc9857779b28efebf62d804eaf374929d650bb3f" }
 dependencies = [
     { name = "geopandas" },
     { name = "matplotlib" },
@@ -2940,27 +2940,6 @@ dependencies = [
     { name = "rasterio" },
     { name = "shapely" },
     { name = "whitebox-workflows" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "geopandas" },
-    { name = "matplotlib", specifier = ">=3.10.9" },
-    { name = "numpy" },
-    { name = "pytest", marker = "extra == 'dev'" },
-    { name = "pytest-cov", marker = "extra == 'dev'" },
-    { name = "rasterio" },
-    { name = "shapely", specifier = ">=2.1.2" },
-    { name = "whitebox-workflows", specifier = ">=1.3.5" },
-]
-provides-extras = ["dev"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3" },
-    { name = "pytest-cov", specifier = ">=7.1.0" },
-    { name = "ruff", specifier = ">=0.15.12" },
-    { name = "ty", specifier = ">=0.0.33" },
 ]
 
 [[package]]
