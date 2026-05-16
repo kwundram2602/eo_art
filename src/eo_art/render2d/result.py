@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -69,9 +70,9 @@ class RenderStep:
 
     def style_transfer(
         self,
-        style: str | Path | "RenderStep",
-        **kwargs: object,
-    ) -> "RenderStep":
+        style: str | Path | RenderStep,
+        **kwargs: Any,
+    ) -> RenderStep:
         """Apply neural style transfer to this RenderStep.
 
         Args:

@@ -7,14 +7,15 @@ import numpy as np
 
 if TYPE_CHECKING:
     import torch
+
     from .result import RenderStep
 
 _IMAGENET_MEAN = [0.485, 0.456, 0.406]
 _IMAGENET_STD = [0.229, 0.224, 0.225]
 
-_GATYS_CONTENT_LAYER = 21            # conv4_2 in VGG19 features
+_GATYS_CONTENT_LAYER = 21  # conv4_2 in VGG19 features
 _GATYS_STYLE_LAYERS = [0, 5, 10, 19, 28]  # conv1_1 … conv5_1 in VGG19 features
-_ADAIN_ENCODER_DEPTH = 21            # VGG19 features[:21] → relu4_1 (512 ch)
+_ADAIN_ENCODER_DEPTH = 21  # VGG19 features[:21] → relu4_1 (512 ch)
 
 _ADAIN_CACHE_DIR = Path.home() / ".cache" / "eo_art"
 _ADAIN_DECODER_PATH = _ADAIN_CACHE_DIR / "adain_decoder.pth"
@@ -37,7 +38,7 @@ def _require_torch() -> None:
         ) from None
 
 
-def _to_tensor(pixels: np.ndarray) -> "torch.Tensor":
+def _to_tensor(pixels: np.ndarray) -> torch.Tensor:
     """Convert an HxWxC float32 array to a 1xCxHxW tensor."""
     import torch
 
@@ -45,16 +46,16 @@ def _to_tensor(pixels: np.ndarray) -> "torch.Tensor":
     return t.unsqueeze(0)
 
 
-def _to_pixels(t: "torch.Tensor") -> np.ndarray:
+def _to_pixels(t: torch.Tensor) -> np.ndarray:
     """Convert a 1xCxHxW tensor back to an HxWxC float32 array, clipped to [0, 1]."""
     arr = t.squeeze(0).cpu().detach().numpy().transpose(1, 2, 0)
     return np.clip(arr, 0.0, 1.0).astype(np.float32)
 
 
 def _load_style(
-    src: "str | Path | RenderStep",
-    device: "torch.device",
-) -> "torch.Tensor":
+    src: str | Path | RenderStep,
+    device: torch.device,
+) -> torch.Tensor:
     """Load a style image from a file path or RenderStep into a 1x3xHxW tensor.
 
     Args:
@@ -85,9 +86,9 @@ def _load_style(
 
 
 def _resize_for_nst(
-    t: "torch.Tensor",
+    t: torch.Tensor,
     max_size: int,
-) -> "tuple[torch.Tensor, tuple[int, int]]":
+) -> tuple[torch.Tensor, tuple[int, int]]:
     """Downscale a tensor so its longest side is at most max_size.
 
     Args:
@@ -112,9 +113,9 @@ def _resize_for_nst(
 
 
 def _resize_back(
-    t: "torch.Tensor",
-    hw: "tuple[int, int]",
-) -> "torch.Tensor":
+    t: torch.Tensor,
+    hw: tuple[int, int],
+) -> torch.Tensor:
     """Upscale a tensor to the given (H, W) using bicubic interpolation.
 
     Args:
@@ -129,7 +130,7 @@ def _resize_back(
     return F.interpolate(t, size=hw, mode="bicubic", align_corners=False)
 
 
-def _vgg_normalize(t: "torch.Tensor", device: "torch.device") -> "torch.Tensor":
+def _vgg_normalize(t: torch.Tensor, device: torch.device) -> torch.Tensor:
     """Normalize a tensor with ImageNet mean and std for VGG input.
 
     Args:
@@ -146,7 +147,7 @@ def _vgg_normalize(t: "torch.Tensor", device: "torch.device") -> "torch.Tensor":
     return (t - mean) / std
 
 
-def _gram(t: "torch.Tensor") -> "torch.Tensor":
+def _gram(t: torch.Tensor) -> torch.Tensor:
     """Compute the normalised Gram matrix of a feature map.
 
     Args:
@@ -161,14 +162,14 @@ def _gram(t: "torch.Tensor") -> "torch.Tensor":
 
 
 def _gatys(
-    content: "torch.Tensor",
-    style: "torch.Tensor",
+    content: torch.Tensor,
+    style: torch.Tensor,
     *,
-    device: "torch.device",
+    device: torch.device,
     steps: int,
     content_weight: float,
     style_weight: float,
-) -> "torch.Tensor":
+) -> torch.Tensor:
     """Run the Gatys et al. (2015) neural style transfer optimisation.
 
     Optimises a copy of ``content`` to minimise a weighted sum of content
@@ -196,7 +197,7 @@ def _gatys(
 
     _max_layer = max(_GATYS_STYLE_LAYERS + [_GATYS_CONTENT_LAYER])
 
-    def get_feats(x: "torch.Tensor") -> "dict[int, torch.Tensor]":
+    def get_feats(x: torch.Tensor) -> dict[int, torch.Tensor]:
         out: dict[int, torch.Tensor] = {}
         for i, layer in enumerate(vgg):
             x = layer(x)
@@ -240,29 +241,46 @@ class _AdaINDecoder:
     or custom forward logic is required.
     """
 
-    def __new__(cls) -> "torch.nn.Module":  # type: ignore[misc]
+    def __new__(cls) -> torch.nn.Module:  # type: ignore[misc]
         import torch.nn as nn
 
         return nn.Sequential(
-            nn.ReflectionPad2d(1), nn.Conv2d(512, 256, 3), nn.ReLU(),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(512, 256, 3),
+            nn.ReLU(),
             nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.ReflectionPad2d(1), nn.Conv2d(256, 256, 3), nn.ReLU(),
-            nn.ReflectionPad2d(1), nn.Conv2d(256, 256, 3), nn.ReLU(),
-            nn.ReflectionPad2d(1), nn.Conv2d(256, 256, 3), nn.ReLU(),
-            nn.ReflectionPad2d(1), nn.Conv2d(256, 128, 3), nn.ReLU(),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(256, 256, 3),
+            nn.ReLU(),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(256, 256, 3),
+            nn.ReLU(),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(256, 256, 3),
+            nn.ReLU(),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(256, 128, 3),
+            nn.ReLU(),
             nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.ReflectionPad2d(1), nn.Conv2d(128, 128, 3), nn.ReLU(),
-            nn.ReflectionPad2d(1), nn.Conv2d(128, 64, 3), nn.ReLU(),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(128, 128, 3),
+            nn.ReLU(),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(128, 64, 3),
+            nn.ReLU(),
             nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.ReflectionPad2d(1), nn.Conv2d(64, 64, 3), nn.ReLU(),
-            nn.ReflectionPad2d(1), nn.Conv2d(64, 3, 3),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(64, 64, 3),
+            nn.ReLU(),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(64, 3, 3),
         )
 
 
 def _adain_normalize(
-    content_feat: "torch.Tensor",
-    style_feat: "torch.Tensor",
-) -> "torch.Tensor":
+    content_feat: torch.Tensor,
+    style_feat: torch.Tensor,
+) -> torch.Tensor:
     """Apply Adaptive Instance Normalisation to content features using style statistics.
 
     Normalises ``content_feat`` to zero mean / unit variance, then rescales
@@ -283,7 +301,7 @@ def _adain_normalize(
     return (content_feat - c_mean) / c_std * s_std + s_mean
 
 
-def _load_adain_decoder(device: "torch.device") -> "torch.nn.Module":
+def _load_adain_decoder(device: torch.device) -> torch.nn.Module:
     """Load the AdaIN decoder weights, downloading them on first use.
 
     The decoder ``~/.cache/eo_art/adain_decoder.pth`` is downloaded from
@@ -321,11 +339,11 @@ def _load_adain_decoder(device: "torch.device") -> "torch.nn.Module":
 
 
 def _adain(
-    content: "torch.Tensor",
-    style: "torch.Tensor",
+    content: torch.Tensor,
+    style: torch.Tensor,
     *,
-    device: "torch.device",
-) -> "torch.Tensor":
+    device: torch.device,
+) -> torch.Tensor:
     """Run AdaIN fast feed-forward style transfer.
 
     Encodes both images with a frozen VGG19 encoder (up to relu4_1),
@@ -363,8 +381,8 @@ def _adain(
 
 
 def neural_style_transfer(
-    content: "RenderStep",
-    style: "str | Path | RenderStep",
+    content: RenderStep,
+    style: str | Path | RenderStep,
     *,
     method: Literal["gatys", "adain"] = "gatys",
     max_size: int = 512,
@@ -372,7 +390,7 @@ def neural_style_transfer(
     content_weight: float = 1.0,
     style_weight: float = 1e6,
     device: str | None = None,
-) -> "RenderStep":
+) -> RenderStep:
     """Apply neural style transfer to a geospatial raster render.
 
     Transfers the visual style of ``style`` onto ``content`` using either
@@ -412,7 +430,8 @@ def neural_style_transfer(
 
     if content.pixels.ndim != 3 or content.pixels.shape[2] != 3:
         raise ValueError(
-            f"content must have 3 channels (H, W, 3), got shape {content.pixels.shape}. "
+            f"content must have 3 channels (H, W, 3), "
+            f"got shape {content.pixels.shape}. "
             "Use .composite.rgb() or .colorize() first."
         )
 
@@ -426,7 +445,7 @@ def neural_style_transfer(
         else "cpu"
     )
 
-    content_t = _to_tensor(content.pixels).to(dev)
+    content_t = _to_tensor(content.pixels).to(dev).clamp_(0.0, 1.0)
     style_t = _load_style(style, dev)
 
     content_small, orig_hw = _resize_for_nst(content_t, max_size)

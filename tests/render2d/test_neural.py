@@ -16,8 +16,8 @@ requires_torch = pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 
 def _has_network() -> bool:
     """Return True only when the AdaIN decoder weights are downloadable."""
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     try:
         socket.create_connection(("github.com", 443), timeout=3)
@@ -44,7 +44,7 @@ def _make_step(
     w: int = 64,
     channels: int = 3,
     crs: str = "EPSG:4326",
-) -> "RenderStep":
+):
     from eo_art.render2d.result import RenderStep
 
     rng = np.random.default_rng(42)
@@ -53,6 +53,7 @@ def _make_step(
 
 
 # ── import guard ──────────────────────────────────────────────────────────────
+
 
 def test_missing_dep_raises_import_error() -> None:
     """_require_torch() raises ImportError with pip hint when torch is absent."""
@@ -64,6 +65,7 @@ def test_missing_dep_raises_import_error() -> None:
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
 
 @requires_torch
 def test_to_tensor_shape() -> None:
@@ -96,15 +98,12 @@ def test_to_pixels_clips() -> None:
 
 @requires_torch
 def test_load_style_from_path(tmp_path: Path) -> None:
+    import torch
     from PIL import Image
 
     from eo_art.render2d.neural import _load_style
 
-    import torch
-
-    img = Image.fromarray(
-        (np.random.rand(32, 32, 3) * 255).astype(np.uint8)
-    )
+    img = Image.fromarray((np.random.rand(32, 32, 3) * 255).astype(np.uint8))
     p = tmp_path / "style.png"
     img.save(p)
     t = _load_style(p, torch.device("cpu"))
@@ -113,9 +112,9 @@ def test_load_style_from_path(tmp_path: Path) -> None:
 
 @requires_torch
 def test_load_style_from_renderstep() -> None:
-    from eo_art.render2d.neural import _load_style
-
     import torch
+
+    from eo_art.render2d.neural import _load_style
 
     step = _make_step(32, 32, channels=3)
     t = _load_style(step, torch.device("cpu"))
@@ -159,15 +158,14 @@ def test_resize_back_restores_size() -> None:
 
 # ── Gatys ─────────────────────────────────────────────────────────────────────
 
+
 @requires_torch
 def test_gatys_output_shape_matches_content() -> None:
     from eo_art import neural_style_transfer
 
     content = _make_step(64, 80)
     style = _make_step(32, 32)
-    result = neural_style_transfer(
-        content, style, method="gatys", max_size=32, steps=2
-    )
+    result = neural_style_transfer(content, style, method="gatys", max_size=32, steps=2)
     assert result.pixels.shape == (64, 80, 3)
 
 
@@ -182,9 +180,7 @@ def test_gatys_crs_and_resolution_preserved() -> None:
         resolution=30.0,
     )
     style = _make_step(32, 32)
-    result = neural_style_transfer(
-        content, style, method="gatys", max_size=32, steps=2
-    )
+    result = neural_style_transfer(content, style, method="gatys", max_size=32, steps=2)
     assert result.crs == "EPSG:32632"
     assert result.resolution == 30.0
 
@@ -195,9 +191,7 @@ def test_gatys_style_from_path(tmp_path: Path) -> None:
 
     from eo_art import neural_style_transfer
 
-    img = Image.fromarray(
-        (np.random.rand(32, 32, 3) * 255).astype(np.uint8)
-    )
+    img = Image.fromarray((np.random.rand(32, 32, 3) * 255).astype(np.uint8))
     style_path = tmp_path / "style.jpg"
     img.save(style_path)
 
@@ -215,9 +209,7 @@ def test_gatys_output_pixels_in_range() -> None:
 
     content = _make_step(32, 32)
     style = _make_step(32, 32)
-    result = neural_style_transfer(
-        content, style, method="gatys", max_size=32, steps=2
-    )
+    result = neural_style_transfer(content, style, method="gatys", max_size=32, steps=2)
     assert result.pixels.min() >= 0.0
     assert result.pixels.max() <= 1.0
 
@@ -249,16 +241,17 @@ def test_non_rgb_content_raises_value_error() -> None:
 
 # ── AdaIN ─────────────────────────────────────────────────────────────────────
 
+
 @requires_torch
-@pytest.mark.skipif(not _has_network(), reason="no network — skipping AdaIN weight download")
+@pytest.mark.skipif(
+    not _has_network(), reason="no network — skipping AdaIN weight download"
+)
 def test_adain_smoke() -> None:
     from eo_art import neural_style_transfer
 
     content = _make_step(64, 64)
     style = _make_step(64, 64)
-    result = neural_style_transfer(
-        content, style, method="adain", max_size=64
-    )
+    result = neural_style_transfer(content, style, method="adain", max_size=64)
     assert result.pixels.shape == (64, 64, 3)
     assert result.pixels.dtype == np.float32
     assert result.pixels.min() >= 0.0
@@ -268,6 +261,7 @@ def test_adain_smoke() -> None:
 
 
 # ── RenderStep.style_transfer wrapper ─────────────────────────────────────────
+
 
 @requires_torch
 def test_renderstep_method_equals_standalone() -> None:
@@ -282,13 +276,12 @@ def test_renderstep_method_equals_standalone() -> None:
     result_fn = neural_style_transfer(
         content, style, method="gatys", max_size=32, steps=2
     )
-    result_method = content.style_transfer(
-        style, method="gatys", max_size=32, steps=2
-    )
+    result_method = content.style_transfer(style, method="gatys", max_size=32, steps=2)
     # Both paths must produce the same shape + metadata
     assert result_fn.pixels.shape == result_method.pixels.shape
     assert result_fn.crs == result_method.crs
     assert result_fn.resolution == result_method.resolution
+    np.testing.assert_allclose(result_fn.pixels, result_method.pixels, atol=1e-4)
 
 
 @requires_torch
