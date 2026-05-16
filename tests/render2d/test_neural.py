@@ -265,3 +265,34 @@ def test_adain_smoke() -> None:
     assert result.pixels.max() <= 1.0
     assert result.crs == content.crs
     assert result.resolution == content.resolution
+
+
+# ── RenderStep.style_transfer wrapper ─────────────────────────────────────────
+
+@requires_torch
+def test_renderstep_method_equals_standalone() -> None:
+    from eo_art import neural_style_transfer
+    from eo_art.render2d.result import RenderStep
+
+    rng = np.random.default_rng(0)
+    pixels = rng.random((32, 32, 3)).astype(np.float32)
+    content = RenderStep(pixels=pixels, crs="EPSG:4326", resolution=10.0)
+    style = _make_step(32, 32)
+
+    result_fn = neural_style_transfer(
+        content, style, method="gatys", max_size=32, steps=2
+    )
+    result_method = content.style_transfer(
+        style, method="gatys", max_size=32, steps=2
+    )
+    # Both paths must produce the same shape + metadata
+    assert result_fn.pixels.shape == result_method.pixels.shape
+    assert result_fn.crs == result_method.crs
+    assert result_fn.resolution == result_method.resolution
+
+
+@requires_torch
+def test_neural_style_transfer_importable_from_eo_art() -> None:
+    from eo_art import neural_style_transfer
+
+    assert callable(neural_style_transfer)
