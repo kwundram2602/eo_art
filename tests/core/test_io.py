@@ -1,7 +1,7 @@
 import pytest
 
 from eo_art.core.data import EOData
-from eo_art.core.errors import CRSMissingError, EODataLoadError
+from eo_art.core.errors import EODataLoadError
 from eo_art.core.io import load_file
 
 

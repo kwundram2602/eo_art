@@ -1,0 +1,16 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.claude
+.vscode
+CLAUDE.md
+scripts
+# Shipped wheels (copied by scripts/ship.py)
+.shipped-packages/

@@ -1,0 +1,4 @@
+# ndvi.yaml
+cmap: RdYlGn
+blend_mode: normal
+alpha: 1.0
