@@ -44,3 +44,97 @@ def test_missing_dep_raises_import_error() -> None:
     with patch.dict(sys.modules, {"torch": None}):
         with pytest.raises(ImportError, match="pip install eo-art"):
             _require_torch()
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+@requires_torch
+def test_to_tensor_shape() -> None:
+    from eo_art.render2d.neural import _to_tensor
+
+    pixels = np.random.rand(32, 48, 3).astype(np.float32)
+    t = _to_tensor(pixels)
+    assert t.shape == (1, 3, 32, 48)
+
+
+@requires_torch
+def test_to_pixels_roundtrip() -> None:
+    from eo_art.render2d.neural import _to_pixels, _to_tensor
+
+    pixels = np.random.rand(32, 48, 3).astype(np.float32)
+    recovered = _to_pixels(_to_tensor(pixels))
+    assert recovered.shape == (32, 48, 3)
+    assert recovered.dtype == np.float32
+    np.testing.assert_allclose(recovered, pixels, atol=1e-5)
+
+
+@requires_torch
+def test_to_pixels_clips() -> None:
+    from eo_art.render2d.neural import _to_pixels, _to_tensor
+
+    pixels = np.full((8, 8, 3), 2.0, dtype=np.float32)
+    out = _to_pixels(_to_tensor(pixels))
+    assert out.max() <= 1.0
+
+
+@requires_torch
+def test_load_style_from_path(tmp_path: Path) -> None:
+    from PIL import Image
+
+    from eo_art.render2d.neural import _load_style
+
+    import torch
+
+    img = Image.fromarray(
+        (np.random.rand(32, 32, 3) * 255).astype(np.uint8)
+    )
+    p = tmp_path / "style.png"
+    img.save(p)
+    t = _load_style(p, torch.device("cpu"))
+    assert t.shape == (1, 3, 32, 32)
+
+
+@requires_torch
+def test_load_style_from_renderstep() -> None:
+    from eo_art.render2d.neural import _load_style
+
+    import torch
+
+    step = _make_step(32, 32, channels=3)
+    t = _load_style(step, torch.device("cpu"))
+    assert t.shape == (1, 3, 32, 32)
+
+
+@requires_torch
+def test_resize_for_nst_downscales() -> None:
+    import torch
+
+    from eo_art.render2d.neural import _resize_for_nst
+
+    t = torch.rand(1, 3, 256, 256)
+    small, orig_hw = _resize_for_nst(t, max_size=64)
+    assert max(small.shape[2], small.shape[3]) <= 64
+    assert orig_hw == (256, 256)
+
+
+@requires_torch
+def test_resize_for_nst_noop_when_small() -> None:
+    import torch
+
+    from eo_art.render2d.neural import _resize_for_nst
+
+    t = torch.rand(1, 3, 32, 32)
+    small, orig_hw = _resize_for_nst(t, max_size=512)
+    assert small.shape == (1, 3, 32, 32)
+    assert orig_hw == (32, 32)
+
+
+@requires_torch
+def test_resize_back_restores_size() -> None:
+    import torch
+
+    from eo_art.render2d.neural import _resize_back
+
+    t = torch.rand(1, 3, 64, 64)
+    restored = _resize_back(t, (128, 200))
+    assert restored.shape == (1, 3, 128, 200)
