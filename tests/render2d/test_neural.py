@@ -138,3 +138,93 @@ def test_resize_back_restores_size() -> None:
     t = torch.rand(1, 3, 64, 64)
     restored = _resize_back(t, (128, 200))
     assert restored.shape == (1, 3, 128, 200)
+
+
+# ── Gatys ─────────────────────────────────────────────────────────────────────
+
+@requires_torch
+def test_gatys_output_shape_matches_content() -> None:
+    from eo_art import neural_style_transfer
+
+    content = _make_step(64, 80)
+    style = _make_step(32, 32)
+    result = neural_style_transfer(
+        content, style, method="gatys", max_size=32, steps=2
+    )
+    assert result.pixels.shape == (64, 80, 3)
+
+
+@requires_torch
+def test_gatys_crs_and_resolution_preserved() -> None:
+    from eo_art import neural_style_transfer
+    from eo_art.render2d.result import RenderStep
+
+    content = RenderStep(
+        pixels=np.random.default_rng(1).random((32, 32, 3)).astype(np.float32),
+        crs="EPSG:32632",
+        resolution=30.0,
+    )
+    style = _make_step(32, 32)
+    result = neural_style_transfer(
+        content, style, method="gatys", max_size=32, steps=2
+    )
+    assert result.crs == "EPSG:32632"
+    assert result.resolution == 30.0
+
+
+@requires_torch
+def test_gatys_style_from_path(tmp_path: Path) -> None:
+    from PIL import Image
+
+    from eo_art import neural_style_transfer
+
+    img = Image.fromarray(
+        (np.random.rand(32, 32, 3) * 255).astype(np.uint8)
+    )
+    style_path = tmp_path / "style.jpg"
+    img.save(style_path)
+
+    content = _make_step(32, 32)
+    result = neural_style_transfer(
+        content, style_path, method="gatys", max_size=32, steps=2
+    )
+    assert result.pixels.shape == (32, 32, 3)
+    assert result.pixels.dtype == np.float32
+
+
+@requires_torch
+def test_gatys_output_pixels_in_range() -> None:
+    from eo_art import neural_style_transfer
+
+    content = _make_step(32, 32)
+    style = _make_step(32, 32)
+    result = neural_style_transfer(
+        content, style, method="gatys", max_size=32, steps=2
+    )
+    assert result.pixels.min() >= 0.0
+    assert result.pixels.max() <= 1.0
+
+
+@requires_torch
+def test_invalid_method_raises_value_error() -> None:
+    from eo_art import neural_style_transfer
+
+    content = _make_step(32, 32)
+    style = _make_step(32, 32)
+    with pytest.raises(ValueError, match="Unknown method"):
+        neural_style_transfer(content, style, method="invalid")  # type: ignore[arg-type]
+
+
+@requires_torch
+def test_non_rgb_content_raises_value_error() -> None:
+    from eo_art import neural_style_transfer
+    from eo_art.render2d.result import RenderStep
+
+    content = RenderStep(
+        pixels=np.random.rand(32, 32).astype(np.float32),
+        crs="EPSG:4326",
+        resolution=1.0,
+    )
+    style = _make_step(32, 32)
+    with pytest.raises(ValueError, match="3 channels"):
+        neural_style_transfer(content, style, method="gatys", max_size=32, steps=2)

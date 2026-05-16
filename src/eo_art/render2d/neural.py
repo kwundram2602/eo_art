@@ -141,3 +141,178 @@ def _vgg_normalize(t: "torch.Tensor", device: "torch.device") -> "torch.Tensor":
     mean = torch.tensor(_IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
     std = torch.tensor(_IMAGENET_STD, device=device).view(1, 3, 1, 1)
     return (t - mean) / std
+
+
+def _gram(t: "torch.Tensor") -> "torch.Tensor":
+    """Compute the normalised Gram matrix of a feature map.
+
+    Args:
+        t: Feature tensor of shape (1, C, H, W).
+
+    Returns:
+        Gram matrix of shape (C, C), normalised by C * H * W.
+    """
+    _, c, h, w = t.shape
+    f = t.view(c, h * w)
+    return (f @ f.t()) / (c * h * w)
+
+
+def _gatys(
+    content: "torch.Tensor",
+    style: "torch.Tensor",
+    *,
+    device: "torch.device",
+    steps: int,
+    content_weight: float,
+    style_weight: float,
+) -> "torch.Tensor":
+    """Run the Gatys et al. (2015) neural style transfer optimisation.
+
+    Optimises a copy of ``content`` to minimise a weighted sum of content
+    loss (at ``_GATYS_CONTENT_LAYER``) and style loss (Gram matrices at
+    ``_GATYS_STYLE_LAYERS``) against the provided style image.
+
+    Args:
+        content: Content image tensor of shape (1, 3, H, W) in [0, 1].
+        style: Style image tensor of shape (1, 3, H', W') in [0, 1].
+        device: Torch device for all computation.
+        steps: Number of Adam optimisation steps.
+        content_weight: Weight applied to the content loss term.
+        style_weight: Weight applied to the style loss term.
+
+    Returns:
+        Stylised tensor of shape (1, 3, H, W) clamped to [0, 1].
+    """
+    import torch
+    import torch.nn.functional as F
+    from torchvision.models import VGG19_Weights, vgg19
+
+    vgg = vgg19(weights=VGG19_Weights.DEFAULT).features.to(device).eval()
+    for p in vgg.parameters():
+        p.requires_grad_(False)
+
+    _max_layer = max(_GATYS_STYLE_LAYERS + [_GATYS_CONTENT_LAYER])
+
+    def get_feats(x: "torch.Tensor") -> "dict[int, torch.Tensor]":
+        out: dict[int, torch.Tensor] = {}
+        for i, layer in enumerate(vgg):
+            x = layer(x)
+            if i in {_GATYS_CONTENT_LAYER, *_GATYS_STYLE_LAYERS}:
+                out[i] = x
+            if i >= _max_layer:
+                break
+        return out
+
+    content_feats = get_feats(_vgg_normalize(content, device))
+    style_feats = get_feats(_vgg_normalize(style, device))
+    style_grams = {i: _gram(style_feats[i]) for i in _GATYS_STYLE_LAYERS}
+
+    target = content.clone().requires_grad_(True)
+    optimizer = torch.optim.Adam([target], lr=0.01)
+
+    for _ in range(steps):
+        target.data.clamp_(0.0, 1.0)
+        optimizer.zero_grad()
+        target_feats = get_feats(_vgg_normalize(target, device))
+        c_loss = content_weight * F.mse_loss(
+            target_feats[_GATYS_CONTENT_LAYER],
+            content_feats[_GATYS_CONTENT_LAYER],
+        )
+        s_loss = style_weight * sum(
+            F.mse_loss(_gram(target_feats[i]), style_grams[i])
+            for i in _GATYS_STYLE_LAYERS
+        )
+        (c_loss + s_loss).backward()
+        optimizer.step()
+
+    target.data.clamp_(0.0, 1.0)
+    return target.detach()
+
+
+def neural_style_transfer(
+    content: "RenderStep",
+    style: "str | Path | RenderStep",
+    *,
+    method: Literal["gatys", "adain"] = "gatys",
+    max_size: int = 512,
+    steps: int = 300,
+    content_weight: float = 1.0,
+    style_weight: float = 1e6,
+    device: str | None = None,
+) -> "RenderStep":
+    """Apply neural style transfer to a geospatial raster render.
+
+    Transfers the visual style of ``style`` onto ``content`` using either
+    the Gatys (2015) optimisation-based method or AdaIN fast feed-forward
+    transfer.  Geospatial metadata (CRS, resolution) is preserved from
+    ``content``.
+
+    Args:
+        content: Source RenderStep with RGB pixels (H, W, 3) in [0, 1].
+        style: Style source — a file path (str or Path) to any image that
+            Pillow can open, or a RenderStep.
+        method: ``"gatys"`` for iterative optimisation (high quality, slow)
+            or ``"adain"`` for fast feed-forward transfer.
+        max_size: Longest spatial dimension used during NST.  Both images are
+            downscaled to this size before processing; the result is bicubic-
+            upscaled back to the original content dimensions.
+        steps: Number of optimisation steps (Gatys only; ignored by AdaIN).
+        content_weight: Weight of the content loss (Gatys only).
+        style_weight: Weight of the style loss (Gatys only).
+        device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).  Auto-
+            detected (CUDA → MPS → CPU) when ``None``.
+
+    Returns:
+        A new RenderStep with stylised pixels of the same shape as ``content``
+        and the same CRS/resolution metadata.
+
+    Raises:
+        ValueError: If ``content`` does not have exactly 3 channels.
+        ValueError: If ``method`` is not ``"gatys"`` or ``"adain"``.
+        ImportError: If PyTorch is not installed.
+    """
+    _require_torch()
+
+    import torch
+
+    from .result import RenderStep
+
+    if content.pixels.ndim != 3 or content.pixels.shape[2] != 3:
+        raise ValueError(
+            f"content must have 3 channels (H, W, 3), got shape {content.pixels.shape}. "
+            "Use .composite.rgb() or .colorize() first."
+        )
+
+    dev = torch.device(
+        device
+        if device is not None
+        else "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
+    )
+
+    content_t = _to_tensor(content.pixels).to(dev)
+    style_t = _load_style(style, dev)
+
+    content_small, orig_hw = _resize_for_nst(content_t, max_size)
+    style_small, _ = _resize_for_nst(style_t, max_size)
+
+    if method == "gatys":
+        result_small = _gatys(
+            content_small,
+            style_small,
+            device=dev,
+            steps=steps,
+            content_weight=content_weight,
+            style_weight=style_weight,
+        )
+    elif method == "adain":
+        result_small = _adain(content_small, style_small, device=dev)
+    else:
+        raise ValueError(f"Unknown method: {method!r}. Choose 'gatys' or 'adain'.")
+
+    result_t = _resize_back(result_small, orig_hw)
+    out_pixels = _to_pixels(result_t)
+    return RenderStep(pixels=out_pixels, crs=content.crs, resolution=content.resolution)
