@@ -15,10 +15,27 @@ requires_torch = pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 
 
 def _has_network() -> bool:
+    """Return True only when the AdaIN decoder weights are downloadable."""
+    import urllib.request
+    import urllib.error
+
     try:
         socket.create_connection(("github.com", 443), timeout=3)
-        return True
     except OSError:
+        return False
+
+    # Verify the actual weights URL is reachable (not just general internet).
+    from eo_art.render2d.neural import _ADAIN_DECODER_URL
+
+    try:
+        req = urllib.request.Request(
+            _ADAIN_DECODER_URL,
+            method="HEAD",
+            headers={"User-Agent": "eo_art/tests"},
+        )
+        urllib.request.urlopen(req, timeout=5)
+        return True
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
         return False
 
 
@@ -228,3 +245,23 @@ def test_non_rgb_content_raises_value_error() -> None:
     style = _make_step(32, 32)
     with pytest.raises(ValueError, match="3 channels"):
         neural_style_transfer(content, style, method="gatys", max_size=32, steps=2)
+
+
+# ── AdaIN ─────────────────────────────────────────────────────────────────────
+
+@requires_torch
+@pytest.mark.skipif(not _has_network(), reason="no network — skipping AdaIN weight download")
+def test_adain_smoke() -> None:
+    from eo_art import neural_style_transfer
+
+    content = _make_step(64, 64)
+    style = _make_step(64, 64)
+    result = neural_style_transfer(
+        content, style, method="adain", max_size=64
+    )
+    assert result.pixels.shape == (64, 64, 3)
+    assert result.pixels.dtype == np.float32
+    assert result.pixels.min() >= 0.0
+    assert result.pixels.max() <= 1.0
+    assert result.crs == content.crs
+    assert result.resolution == content.resolution

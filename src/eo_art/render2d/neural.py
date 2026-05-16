@@ -18,9 +18,12 @@ _ADAIN_ENCODER_DEPTH = 21            # VGG19 features[:21] → relu4_1 (512 ch)
 
 _ADAIN_CACHE_DIR = Path.home() / ".cache" / "eo_art"
 _ADAIN_DECODER_PATH = _ADAIN_CACHE_DIR / "adain_decoder.pth"
-# NOTE: host decoder.pth on this repo's GitHub releases and update this URL.
+# NOTE: The original naoto0804/pytorch-AdaIN GitHub repo no longer hosts
+# decoder.pth at this path (returns 404).  Host the file on this repo's
+# GitHub Releases and update this URL, or point to a public HuggingFace
+# repo that does not require authentication.
 _ADAIN_DECODER_URL = (
-    "https://github.com/naoto0804/pytorch-AdaIN/raw/master/models/decoder.pth"
+    "https://huggingface.co/p1atdev/pytorch-AdaIN/resolve/main/decoder.pth"
 )
 
 
@@ -227,6 +230,136 @@ def _gatys(
 
     target.data.clamp_(0.0, 1.0)
     return target.detach()
+
+
+class _AdaINDecoder:
+    """Mirror-decoder for VGG19 encoder up to relu4_1 (512 channels out).
+
+    Uses ``__new__`` as a factory to return an ``nn.Sequential`` directly,
+    since the decoder is only ever used as a plain module — no subclassing
+    or custom forward logic is required.
+    """
+
+    def __new__(cls) -> "torch.nn.Module":  # type: ignore[misc]
+        import torch.nn as nn
+
+        return nn.Sequential(
+            nn.ReflectionPad2d(1), nn.Conv2d(512, 256, 3), nn.ReLU(),
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.ReflectionPad2d(1), nn.Conv2d(256, 256, 3), nn.ReLU(),
+            nn.ReflectionPad2d(1), nn.Conv2d(256, 256, 3), nn.ReLU(),
+            nn.ReflectionPad2d(1), nn.Conv2d(256, 256, 3), nn.ReLU(),
+            nn.ReflectionPad2d(1), nn.Conv2d(256, 128, 3), nn.ReLU(),
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.ReflectionPad2d(1), nn.Conv2d(128, 128, 3), nn.ReLU(),
+            nn.ReflectionPad2d(1), nn.Conv2d(128, 64, 3), nn.ReLU(),
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.ReflectionPad2d(1), nn.Conv2d(64, 64, 3), nn.ReLU(),
+            nn.ReflectionPad2d(1), nn.Conv2d(64, 3, 3),
+        )
+
+
+def _adain_normalize(
+    content_feat: "torch.Tensor",
+    style_feat: "torch.Tensor",
+) -> "torch.Tensor":
+    """Apply Adaptive Instance Normalisation to content features using style statistics.
+
+    Normalises ``content_feat`` to zero mean / unit variance, then rescales
+    by the per-channel mean and std of ``style_feat``.
+
+    Args:
+        content_feat: Content feature map of shape (1, C, H, W).
+        style_feat: Style feature map of shape (1, C, H', W').
+
+    Returns:
+        AdaIN-normalised tensor of the same shape as ``content_feat``.
+    """
+    eps = 1e-5
+    s_mean = style_feat.mean(dim=[2, 3], keepdim=True)
+    s_std = style_feat.std(dim=[2, 3], keepdim=True) + eps
+    c_mean = content_feat.mean(dim=[2, 3], keepdim=True)
+    c_std = content_feat.std(dim=[2, 3], keepdim=True) + eps
+    return (content_feat - c_mean) / c_std * s_std + s_mean
+
+
+def _load_adain_decoder(device: "torch.device") -> "torch.nn.Module":
+    """Load the AdaIN decoder weights, downloading them on first use.
+
+    The decoder ``~/.cache/eo_art/adain_decoder.pth`` is downloaded from
+    ``_ADAIN_DECODER_URL`` if it does not exist locally.
+
+    Args:
+        device: Torch device on which to place the decoder.
+
+    Returns:
+        The decoder ``nn.Module`` in eval mode on ``device``.
+
+    Raises:
+        RuntimeError: If the weight file cannot be downloaded.
+    """
+    import torch
+
+    decoder = _AdaINDecoder()
+    if not _ADAIN_DECODER_PATH.exists():
+        _ADAIN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        print(
+            f"[eo_art] Downloading AdaIN decoder weights (~24 MB) "
+            f"to {_ADAIN_DECODER_PATH}"
+        )
+        try:
+            torch.hub.download_url_to_file(_ADAIN_DECODER_URL, str(_ADAIN_DECODER_PATH))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to download AdaIN decoder weights: {exc}\n"
+                f"Download manually from {_ADAIN_DECODER_URL}\n"
+                f"and place at: {_ADAIN_DECODER_PATH}"
+            ) from exc
+    state = torch.load(str(_ADAIN_DECODER_PATH), map_location="cpu", weights_only=True)
+    decoder.load_state_dict(state)
+    return decoder.to(device).eval()
+
+
+def _adain(
+    content: "torch.Tensor",
+    style: "torch.Tensor",
+    *,
+    device: "torch.device",
+) -> "torch.Tensor":
+    """Run AdaIN fast feed-forward style transfer.
+
+    Encodes both images with a frozen VGG19 encoder (up to relu4_1),
+    applies Adaptive Instance Normalisation to align the content features
+    with the style statistics, then decodes back to RGB.
+
+    Args:
+        content: Content image tensor of shape (1, 3, H, W) in [0, 1].
+        style: Style image tensor of shape (1, 3, H', W') in [0, 1].
+        device: Torch device for all computation.
+
+    Returns:
+        Stylised tensor of shape (1, 3, H, W) clamped to [0, 1].
+    """
+    import torch
+    from torchvision.models import VGG19_Weights, vgg19
+
+    encoder = (
+        vgg19(weights=VGG19_Weights.DEFAULT)
+        .features[:_ADAIN_ENCODER_DEPTH]
+        .to(device)
+        .eval()
+    )
+    for p in encoder.parameters():
+        p.requires_grad_(False)
+
+    with torch.no_grad():
+        content_feat = encoder(_vgg_normalize(content, device))
+        style_feat = encoder(_vgg_normalize(style, device))
+        adapted = _adain_normalize(content_feat, style_feat)
+        decoder = _load_adain_decoder(device)
+        output = decoder(adapted)
+
+    return output.clamp(0.0, 1.0)
 
 
 def neural_style_transfer(
