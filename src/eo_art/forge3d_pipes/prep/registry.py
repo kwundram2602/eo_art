@@ -4,6 +4,10 @@ Entries are validated at config-load time, so an unknown op or a bad
 parameter fails before any raster work starts.
 """
 
+import hashlib
+import json
+import shutil
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,3 +70,48 @@ def validate_chain(entries: list[Any]) -> list[tuple[RegisteredOp, Any]]:
         except Exception as exc:
             raise type(exc)(f"prepare[{index}]: {exc}") from exc
     return validated
+
+
+def chain_cache_key(src: Path, entries: list[Any]) -> str:
+    """Hash the source identity plus the canonical prep chain."""
+    stat = src.stat()
+    payload = {
+        "src": str(src.resolve()),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "chain": entries,
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str).encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def run_prep_chain(
+    src: Path,
+    entries: list[Any],
+    cache_dir: Path,
+    use_cache: bool = True,
+) -> Path:
+    """Run the prep chain, caching the result by chain hash.
+
+    Returns ``src`` unchanged when the chain is empty. Intermediates are
+    written to a temporary directory and only the final result is promoted
+    into the cache, so a failing op leaves no partial cache entry.
+    """
+    src = Path(src)
+    if not entries:
+        return src
+
+    key = chain_cache_key(src, entries)
+    final = Path(cache_dir) / f"{key}.tif"
+    if use_cache and final.exists():
+        return final
+
+    final.parent.mkdir(parents=True, exist_ok=True)
+    current = src
+    with tempfile.TemporaryDirectory(dir=final.parent) as tmp:
+        for index, entry in enumerate(entries):
+            op, cfg = validate_entry(entry)
+            dst = Path(tmp) / f"{index:02d}_{op.name}.tif"
+            current = Path(op.func(current, dst, cfg))
+        shutil.move(str(current), final)
+    return final
