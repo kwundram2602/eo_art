@@ -31,7 +31,7 @@ def test_later_file_wins(cfg_files):
     cfg = loader.load_config([base, look])
     assert cfg.render.width == 1600
     assert cfg.render.camera.phi == 100.0  # still from base
-    assert cfg.render.pbr.tonemap.operator is TonemapOperator.REINHARD
+    assert cfg.render.pbr.tonemap.operator is TonemapOperator.reinhard
 
 
 def test_dotlist_beats_files(cfg_files):
@@ -75,3 +75,12 @@ def test_load_raw_keeps_dictconfig_for_sweeping(cfg_files):
     assert raw.render.width == 800
     # DictConfig, not a dataclass instance
     assert not hasattr(raw, "__dataclass_fields__")
+
+
+def test_enum_via_dotlist_override(tmp_path):
+    cfg_file = tmp_path / "c.yaml"
+    cfg_file.write_text("input:\n  path: dem.tif\n")
+    cfg = loader.load_config(
+        [cfg_file], overrides=["render.pbr.tonemap.operator=reinhard"]
+    )
+    assert cfg.render.pbr.tonemap.operator is TonemapOperator.reinhard

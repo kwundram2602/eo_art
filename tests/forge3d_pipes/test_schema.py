@@ -29,8 +29,8 @@ def test_defaults_match_demo1():
     assert cfg.render.pbr.exposure == 1.35
     assert cfg.render.pbr.msaa == 8
     assert cfg.render.pbr.shadow_map_res == 4096
-    assert cfg.render.pbr.shadow_technique is ShadowTechnique.PCSS
-    assert cfg.render.pbr.tonemap.operator is TonemapOperator.ACES
+    assert cfg.render.pbr.shadow_technique is ShadowTechnique.pcss
+    assert cfg.render.pbr.tonemap.operator is TonemapOperator.aces
     assert cfg.render.pbr.materials.snow_altitude_min == 3200.0
     assert cfg.render.pbr.sky.turbidity == 2.5
 

@@ -26,7 +26,7 @@
 These were confirmed empirically against the installed packages. Do not re-derive them.
 
 - `OmegaConf.merge(structured, {"cam": {"fovv": 1}})` raises `ConfigKeyError` (struct mode is implicit for structured configs).
-- Invalid enum values raise `omegaconf.errors.ValidationError`.
+- **OmegaConf matches enums by member name, not value.** Enum members have deliberately lowercase names (e.g. `TonemapOperator.reinhard`) so config files can use lowercase values like `operator: reinhard` instead of `operator: REINHARD`. Invalid enum values raise `omegaconf.errors.ValidationError`.
 - `OmegaConf.to_object(cfg)` returns **real dataclass instances and runs `__post_init__`** — this is where range checks fire.
 - A field defaulted to `omegaconf.MISSING` raises `MissingMandatoryValue` from `to_object()`.
 - `OmegaConf.from_dotlist(["a.b=33"])` coerces to the schema's type on merge.
@@ -139,8 +139,8 @@ def test_defaults_match_demo1():
     assert cfg.render.pbr.exposure == 1.35
     assert cfg.render.pbr.msaa == 8
     assert cfg.render.pbr.shadow_map_res == 4096
-    assert cfg.render.pbr.shadow_technique is ShadowTechnique.PCSS
-    assert cfg.render.pbr.tonemap.operator is TonemapOperator.ACES
+    assert cfg.render.pbr.shadow_technique is ShadowTechnique.pcss
+    assert cfg.render.pbr.tonemap.operator is TonemapOperator.aces
     assert cfg.render.pbr.materials.snow_altitude_min == 3200.0
     assert cfg.render.pbr.sky.turbidity == 2.5
 
@@ -216,41 +216,41 @@ from omegaconf import MISSING
 
 
 class ShadowTechnique(Enum):
-    PCSS = "pcss"
-    PCF = "pcf"
-    NONE = "none"
+    pcss = "pcss"
+    pcf = "pcf"
+    none = "none"
 
 
 class TonemapOperator(Enum):
-    ACES = "aces"
-    REINHARD = "reinhard"
-    LINEAR = "linear"
+    aces = "aces"
+    reinhard = "reinhard"
+    linear = "linear"
 
 
 class SunVisMode(Enum):
-    SOFT = "soft"
-    HARD = "hard"
+    soft = "soft"
+    hard = "hard"
 
 
 class ResamplingName(Enum):
-    NEAREST = "nearest"
-    BILINEAR = "bilinear"
-    CUBIC = "cubic"
+    nearest = "nearest"
+    bilinear = "bilinear"
+    cubic = "cubic"
 
 
 class SweepMode(Enum):
-    PRODUCT = "product"
-    ZIP = "zip"
+    product = "product"
+    zip = "zip"
 
 
 class AnimationKind(Enum):
-    NONE = "none"
-    ORBIT = "orbit"
+    none = "none"
+    orbit = "orbit"
 
 
 class VideoFormat(Enum):
-    MP4 = "mp4"
-    GIF = "gif"
+    mp4 = "mp4"
+    gif = "gif"
 
 
 def _in_range(name: str, value: float, low: float, high: float) -> None:
@@ -309,7 +309,7 @@ class HeightAO:
 @dataclass
 class SunVisibility:
     enabled: bool = True
-    mode: SunVisMode = SunVisMode.SOFT
+    mode: SunVisMode = SunVisMode.soft
     samples: int = 4
     steps: int = 24
     max_distance: float = 400.0
@@ -335,7 +335,7 @@ class Materials:
 
 @dataclass
 class Tonemap:
-    operator: TonemapOperator = TonemapOperator.ACES
+    operator: TonemapOperator = TonemapOperator.aces
     white_point: float = 4.0
     white_balance_enabled: bool = True
     temperature: float = 6000.0
@@ -365,7 +365,7 @@ class Sky:
 @dataclass
 class Pbr:
     enabled: bool = True
-    shadow_technique: ShadowTechnique = ShadowTechnique.PCSS
+    shadow_technique: ShadowTechnique = ShadowTechnique.pcss
     shadow_map_res: int = 4096
     exposure: float = 1.35
     msaa: int = 8
@@ -417,7 +417,7 @@ class Orbit:
 
 @dataclass
 class Animation:
-    kind: AnimationKind = AnimationKind.NONE
+    kind: AnimationKind = AnimationKind.none
     fps: int = 30
     orbit: Orbit = field(default_factory=Orbit)
 
@@ -428,7 +428,7 @@ class Animation:
 @dataclass
 class Video:
     enabled: bool = False
-    format: VideoFormat = VideoFormat.MP4
+    format: VideoFormat = VideoFormat.mp4
     fps: int = 30
     quality: int = 8
 
@@ -444,7 +444,7 @@ class Export:
 
 @dataclass
 class Sweep:
-    mode: SweepMode = SweepMode.PRODUCT
+    mode: SweepMode = SweepMode.product
     params: dict[str, Any] = field(default_factory=dict)
 
 
@@ -740,7 +740,7 @@ def test_later_file_wins(cfg_files):
     cfg = loader.load_config([base, look])
     assert cfg.render.width == 1600
     assert cfg.render.camera.phi == 100.0  # still from base
-    assert cfg.render.pbr.tonemap.operator is TonemapOperator.REINHARD
+    assert cfg.render.pbr.tonemap.operator is TonemapOperator.reinhard
 
 
 def test_dotlist_beats_files(cfg_files):
@@ -1202,22 +1202,22 @@ from eo_art.forge3d_pipes.config.schema import ResamplingName
 from eo_art.forge3d_pipes.prep.registry import register_op
 
 _RESAMPLING = {
-    ResamplingName.NEAREST: Resampling.nearest,
-    ResamplingName.BILINEAR: Resampling.bilinear,
-    ResamplingName.CUBIC: Resampling.cubic,
+    ResamplingName.nearest: Resampling.nearest,
+    ResamplingName.bilinear: Resampling.bilinear,
+    ResamplingName.cubic: Resampling.cubic,
 }
 
 
 @dataclass
 class ReprojectCfg:
     crs: str = MISSING
-    resampling: ResamplingName = ResamplingName.BILINEAR
+    resampling: ResamplingName = ResamplingName.bilinear
 
 
 @dataclass
 class ScaleToGsdCfg:
     target_gsd: float = MISSING
-    resampling: ResamplingName = ResamplingName.BILINEAR
+    resampling: ResamplingName = ResamplingName.bilinear
 
 
 @register_op("reproject", ReprojectCfg)
@@ -1606,13 +1606,13 @@ def test_end_values_interpolate_when_given():
 
 def test_build_returns_none_when_animation_disabled():
     cfg = PipelineConfig()
-    assert cfg.animation.kind is AnimationKind.NONE
+    assert cfg.animation.kind is AnimationKind.none
     assert anim.build_camera_animation(cfg) is None
 
 
 def test_build_returns_camera_animation_with_keyframes():
     cfg = PipelineConfig()
-    cfg.animation = Animation(kind=AnimationKind.ORBIT, fps=4, orbit=Orbit(duration=1.0))
+    cfg.animation = Animation(kind=AnimationKind.orbit, fps=4, orbit=Orbit(duration=1.0))
     result = anim.build_camera_animation(cfg)
     assert result is not None
     assert len(result.get_keyframes()) == 5
@@ -1681,7 +1681,7 @@ def orbit_keyframes(orbit: Orbit, fps: int) -> list[Keyframe]:
 
 def build_camera_animation(cfg: PipelineConfig) -> CameraAnimation | None:
     """Return a forge3d animation, or ``None`` when animation is disabled."""
-    if cfg.animation.kind is AnimationKind.NONE:
+    if cfg.animation.kind is AnimationKind.none:
         return None
 
     animation = CameraAnimation()
@@ -1745,7 +1745,7 @@ def test_empty_params_yields_single_default_variant():
 def test_product_yields_cartesian_grid():
     variants = expand(
         Sweep(
-            mode=SweepMode.PRODUCT,
+            mode=SweepMode.product,
             params={"render.pbr.exposure": [1.0, 2.0], "render.camera.phi": [10, 20]},
         )
     )
@@ -1761,7 +1761,7 @@ def test_product_yields_cartesian_grid():
 def test_zip_walks_lists_in_lockstep():
     variants = expand(
         Sweep(
-            mode=SweepMode.ZIP,
+            mode=SweepMode.zip,
             params={"render.pbr.exposure": [1.0, 2.0], "render.camera.phi": [10, 20]},
         )
     )
@@ -1774,7 +1774,7 @@ def test_zip_rejects_length_mismatch():
     with pytest.raises(ValueError, match="zip sweep requires equal-length"):
         expand(
             Sweep(
-                mode=SweepMode.ZIP,
+                mode=SweepMode.zip,
                 params={"a.b": [1, 2, 3], "c.d": [1, 2]},
             )
         )
@@ -1858,7 +1858,7 @@ def expand(sweep: Sweep | None) -> list[Variant]:
             )
     value_lists = [list(sweep.params[path]) for path in paths]
 
-    if sweep.mode is SweepMode.ZIP:
+    if sweep.mode is SweepMode.zip:
         lengths = {len(values) for values in value_lists}
         if len(lengths) > 1:
             raise ValueError(
@@ -1962,7 +1962,7 @@ def test_collect_frames_ignores_other_files(frames_dir):
 def test_encode_gif_writes_a_file(frames_dir, tmp_path):
     out = tmp_path / "out.gif"
     result = export.encode_video(
-        frames_dir, out, Video(enabled=True, format=VideoFormat.GIF, fps=4)
+        frames_dir, out, Video(enabled=True, format=VideoFormat.gif, fps=4)
     )
     assert result == out
     assert out.stat().st_size > 0
@@ -1972,7 +1972,7 @@ def test_encode_rejects_empty_frames_dir(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     with pytest.raises(ValueError, match="no frames"):
-        export.encode_video(empty, tmp_path / "out.gif", Video(format=VideoFormat.GIF))
+        export.encode_video(empty, tmp_path / "out.gif", Video(format=VideoFormat.gif))
 
 
 def test_missing_ffmpeg_backend_gives_install_hint(frames_dir, tmp_path, monkeypatch):
@@ -1982,7 +1982,7 @@ def test_missing_ffmpeg_backend_gives_install_hint(frames_dir, tmp_path, monkeyp
     monkeypatch.setattr(export, "_write_frames", _boom)
     with pytest.raises(RuntimeError, match="eo-art\\[video\\]"):
         export.encode_video(
-            frames_dir, tmp_path / "out.mp4", Video(format=VideoFormat.MP4)
+            frames_dir, tmp_path / "out.mp4", Video(format=VideoFormat.mp4)
         )
 ```
 
@@ -2044,7 +2044,7 @@ def encode_video(frames_dir: Path, out_path: Path, video: Video) -> Path:
     except ImportError as exc:
         hint = (
             "install the optional video extra: uv add 'eo-art[video]'"
-            if video.format is VideoFormat.MP4
+            if video.format is VideoFormat.mp4
             else "install imageio's plugin for this format"
         )
         raise RuntimeError(f"cannot encode {video.format.value}: {exc}. {hint}") from exc
@@ -2163,7 +2163,7 @@ def test_snapshot_name_is_configurable(fake_viewer, tmp_path):
 
 def test_animation_render_writes_frames_dir(fake_viewer, tmp_path):
     cfg = _cfg(
-        animation=Animation(kind=AnimationKind.ORBIT, fps=4, orbit=Orbit(duration=1.0))
+        animation=Animation(kind=AnimationKind.orbit, fps=4, orbit=Orbit(duration=1.0))
     )
     result = runner.render(cfg, Path("dem.tif"), tmp_path)
     assert result.frames_dir == tmp_path / "frames"
@@ -2173,7 +2173,7 @@ def test_animation_render_writes_frames_dir(fake_viewer, tmp_path):
 
 def test_animation_render_passes_fps(fake_viewer, tmp_path):
     cfg = _cfg(
-        animation=Animation(kind=AnimationKind.ORBIT, fps=12, orbit=Orbit(duration=1.0))
+        animation=Animation(kind=AnimationKind.orbit, fps=12, orbit=Orbit(duration=1.0))
     )
     runner.render(cfg, Path("dem.tif"), tmp_path)
     assert fake_viewer.animations[0][2] == 12
@@ -2261,7 +2261,7 @@ def render(cfg: PipelineConfig, terrain_path: Path, out_dir: Path) -> RenderResu
         viewer.send_ipc(build_set_terrain(cfg))
         viewer.send_ipc(build_set_terrain_pbr(cfg))
 
-        if cfg.animation.kind is AnimationKind.NONE or animation is None:
+        if cfg.animation.kind is AnimationKind.none or animation is None:
             snapshot = out_dir / cfg.render.snapshot_name
             viewer.snapshot(
                 str(snapshot), width=cfg.render.width, height=cfg.render.height

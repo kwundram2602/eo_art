@@ -10,43 +10,47 @@ from typing import Any
 
 from omegaconf import MISSING
 
+# Enum member names are deliberately lowercase. OmegaConf matches enums by member
+# name (not value), so lowercase names allow configs to use lowercase values like
+# `operator: reinhard` instead of `operator: REINHARD`.
+
 
 class ShadowTechnique(Enum):
-    PCSS = "pcss"
-    PCF = "pcf"
-    NONE = "none"
+    pcss = "pcss"
+    pcf = "pcf"
+    none = "none"
 
 
 class TonemapOperator(Enum):
-    ACES = "aces"
-    REINHARD = "reinhard"
-    LINEAR = "linear"
+    aces = "aces"
+    reinhard = "reinhard"
+    linear = "linear"
 
 
 class SunVisMode(Enum):
-    SOFT = "soft"
-    HARD = "hard"
+    soft = "soft"
+    hard = "hard"
 
 
 class ResamplingName(Enum):
-    NEAREST = "nearest"
-    BILINEAR = "bilinear"
-    CUBIC = "cubic"
+    nearest = "nearest"
+    bilinear = "bilinear"
+    cubic = "cubic"
 
 
 class SweepMode(Enum):
-    PRODUCT = "product"
-    ZIP = "zip"
+    product = "product"
+    zip = "zip"
 
 
 class AnimationKind(Enum):
-    NONE = "none"
-    ORBIT = "orbit"
+    none = "none"
+    orbit = "orbit"
 
 
 class VideoFormat(Enum):
-    MP4 = "mp4"
-    GIF = "gif"
+    mp4 = "mp4"
+    gif = "gif"
 
 
 def _in_range(name: str, value: float, low: float, high: float) -> None:
@@ -105,7 +109,7 @@ class HeightAO:
 @dataclass
 class SunVisibility:
     enabled: bool = True
-    mode: SunVisMode = SunVisMode.SOFT
+    mode: SunVisMode = SunVisMode.soft
     samples: int = 4
     steps: int = 24
     max_distance: float = 400.0
@@ -131,7 +135,7 @@ class Materials:
 
 @dataclass
 class Tonemap:
-    operator: TonemapOperator = TonemapOperator.ACES
+    operator: TonemapOperator = TonemapOperator.aces
     white_point: float = 4.0
     white_balance_enabled: bool = True
     temperature: float = 6000.0
@@ -161,7 +165,7 @@ class Sky:
 @dataclass
 class Pbr:
     enabled: bool = True
-    shadow_technique: ShadowTechnique = ShadowTechnique.PCSS
+    shadow_technique: ShadowTechnique = ShadowTechnique.pcss
     shadow_map_res: int = 4096
     exposure: float = 1.35
     msaa: int = 8
@@ -213,7 +217,7 @@ class Orbit:
 
 @dataclass
 class Animation:
-    kind: AnimationKind = AnimationKind.NONE
+    kind: AnimationKind = AnimationKind.none
     fps: int = 30
     orbit: Orbit = field(default_factory=Orbit)
 
@@ -224,7 +228,7 @@ class Animation:
 @dataclass
 class Video:
     enabled: bool = False
-    format: VideoFormat = VideoFormat.MP4
+    format: VideoFormat = VideoFormat.mp4
     fps: int = 30
     quality: int = 8
 
@@ -240,7 +244,7 @@ class Export:
 
 @dataclass
 class Sweep:
-    mode: SweepMode = SweepMode.PRODUCT
+    mode: SweepMode = SweepMode.product
     params: dict[str, Any] = field(default_factory=dict)
 
 
