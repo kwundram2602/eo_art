@@ -42,6 +42,7 @@ These were confirmed empirically against the installed packages. Do not re-deriv
 
 1. **Camera animation does not use `TerrainOrbitRig`.** The spec proposed mapping config onto forge3d's rigs. `_BaseTerrainRig.bake()` requires a `TerrainScatterSource` (a loaded heightfield) and performs clearance refinement that raises `ValueError` when constraints cannot be satisfied. v1 instead builds `CameraAnimation` keyframes directly — pure math, no terrain load, no clearance failure mode, unit-testable without a GPU. Rigs remain a later addition behind the same `animation.kind` switch.
 2. **`camera.fov` default is `60.0`, not demo1's `300.0`.** demo1's value is invalid; its own comment says the flag was never set. This is stated in the spec.
+3. **Render parameter defaults reproduce demo1, but the output filename does not.** `Render.snapshot_name` defaults to a generic `"snapshot.png"`, not a scene-specific value. Scene-specific filenames are set per-variant in the config or at runtime; the library default is generic.
 
 ## File Structure
 
@@ -198,7 +199,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'eo_art.forge3d_pipes.c
 
 - [ ] **Step 5: Write the schema**
 
-Create `src/eo_art/forge3d_pipes/config/schema.py`. Every default is demo1's literal value, except `Camera.fov` (see Deviations).
+Create `src/eo_art/forge3d_pipes/config/schema.py`. Every render parameter default is demo1's literal value (camera, sun, terrain, PBR), except `Camera.fov` (see Deviations). The output filename defaults to a generic `snapshot.png`.
 
 ```python
 """Typed configuration schema for the forge3d render pipeline.

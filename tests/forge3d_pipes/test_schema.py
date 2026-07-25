@@ -18,6 +18,7 @@ def test_defaults_match_demo1():
     cfg = OmegaConf.to_object(OmegaConf.merge(_base(), {"input": {"path": "dem.tif"}}))
     assert cfg.render.width == 1200
     assert cfg.render.height == 720
+    assert cfg.render.snapshot_name == "snapshot.png"
     assert cfg.render.camera.phi == 300.0
     assert cfg.render.camera.theta == 10.5
     assert cfg.render.camera.radius == 26000.0

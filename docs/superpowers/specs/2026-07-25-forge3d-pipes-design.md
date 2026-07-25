@@ -126,9 +126,11 @@ class Pbr:
     sky: Sky = field(default_factory=Sky)
 ```
 
-Every default is demo1's value, except `Camera.fov`, which becomes a valid default
-rather than demo1's erroneous 300. An otherwise empty config therefore reproduces the
-current render; `base.yaml` carries only what differs.
+Every render parameter default is demo1's value — camera, sun, terrain, and PBR settings —
+except `Camera.fov`, which becomes a valid default rather than demo1's erroneous 300.
+The output filename `Render.snapshot_name` defaults to a generic `snapshot.png`, not a
+scene-specific value. An otherwise empty config therefore reproduces the current render;
+`base.yaml` carries only what differs.
 
 Nested blocks — `HeightAO`, `SunVisibility`, `Materials`, `Tonemap`, `LensEffects`,
 `Sky` — follow the same pattern, one dataclass per nested dict in the
