@@ -37,6 +37,7 @@ These were confirmed empirically against the installed packages. Do not re-deriv
 - `forge3d.animation.CameraAnimation()` takes no constructor args; `add_keyframe(time, phi, theta, radius, fov, target=None)`.
 - `vecraspy.scale_raster_to_gsd(input_path, output_path, target_gsd, *, resampling="bilinear") -> Path`.
 - **`vecraspy.reproject_raster` does not exist** — `demo1.py:4` is a broken import. eo_art implements `reproject` on `rasterio.warp`.
+- `vecraspy.scale_raster_to_gsd` rounds the output width/height to whole pixel counts (`round(src.width * src_gsd / target_gsd)`), so the achieved GSD is only approximate on small rasters — e.g. a 2477x3621m extent with `target_gsd=200.0` rounds to 12x18 pixels, yielding ~206m/~201m, not exactly 200m.
 
 ## Deviations From The Spec
 
@@ -1175,7 +1176,10 @@ def test_chain_of_both_ops_runs(synthetic_dem, tmp_path):
     )
     with rasterio.open(result) as src:
         assert src.crs.to_string() == "EPSG:32610"
-        assert src.res[0] == pytest.approx(200.0, rel=0.01)
+        # scale_raster_to_gsd rounds to whole pixel counts, so on a small
+        # raster the achieved GSD deviates from the target by a few percent:
+        # here 12x18 pixels over a 2477x3621m extent yields ~206m, not 200m.
+        assert src.res[0] == pytest.approx(200.0, rel=0.05)
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**

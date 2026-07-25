@@ -67,4 +67,7 @@ def test_chain_of_both_ops_runs(synthetic_dem, tmp_path):
     )
     with rasterio.open(result) as src:
         assert src.crs.to_string() == "EPSG:32610"
-        assert src.res[0] == pytest.approx(200.0, rel=0.01)
+        # scale_raster_to_gsd rounds to whole pixel counts, so on a small
+        # raster the achieved GSD deviates from the target by a few percent:
+        # here 12x18 pixels over a 2477x3621m extent yields ~206m, not 200m.
+        assert src.res[0] == pytest.approx(200.0, rel=0.05)
