@@ -17,6 +17,7 @@ dependencies = [
     "numpy>=2.0.0",
     "imageio>=2.34.0",
     "pyyaml>=6.0",
+    "forge3d>=1.34.0",
 ]
 
 [project.optional-dependencies]
