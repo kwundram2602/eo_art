@@ -1956,6 +1956,26 @@ def test_write_resolved_config_creates_parent_dirs(tmp_path):
     assert path.exists()
 
 
+def test_write_resolved_config_resolves_interpolations(tmp_path):
+    """Verify interpolations are resolved to literal values in saved config."""
+    cfg = OmegaConf.create(
+        {
+            "run": {"out_dir": "/output/myrun"},
+            "export": {"video": "${run.out_dir}/video.mp4"},
+        }
+    )
+    path = export.write_resolved_config(cfg, tmp_path / "resolved.yaml")
+
+    # Reloaded config should have the resolved literal value
+    reloaded = OmegaConf.load(path)
+    assert reloaded.export.video == "/output/myrun/video.mp4"
+
+    # Raw file text should not contain the interpolation syntax
+    raw_text = path.read_text()
+    assert "${" not in raw_text
+    assert "/output/myrun/video.mp4" in raw_text
+
+
 def test_collect_frames_is_sorted(frames_dir):
     frames = export.collect_frames(frames_dir)
     assert [f.name for f in frames] == [
@@ -2021,10 +2041,16 @@ FRAME_GLOB = "frame_*.png"
 
 
 def write_resolved_config(cfg: DictConfig, path: Path) -> Path:
-    """Save the fully merged config next to its outputs, for reproducibility."""
+    """Save the fully merged config with interpolations resolved.
+
+    This creates a standalone record of the exact literal values that produced
+    the render, with all ``${...}`` interpolations replaced by their final
+    values. This ensures reproducibility: the file can be loaded and inspected
+    independently without relying on external configuration context.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    OmegaConf.save(cfg, path)
+    OmegaConf.save(cfg, path, resolve=True)
     return path
 
 
@@ -2067,7 +2093,7 @@ def encode_video(frames_dir: Path, out_path: Path, video: Video) -> Path:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/forge3d_pipes/test_export.py -v`
-Expected: PASS (7 tests)
+Expected: PASS (8 tests)
 
 - [ ] **Step 5: Commit**
 
