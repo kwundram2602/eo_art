@@ -1,0 +1,17 @@
+# Reproduces demo1.py. Every unset value comes from the schema defaults.
+run:
+  name: rainier
+  out_dir: out
+
+input:
+  path: rainier.tif   # override with --set input.path=...
+
+prepare:
+  - op: reproject
+    crs: EPSG:32610
+    resampling: nearest
+
+render:
+  width: 1200
+  height: 720
+  snapshot_name: rainier.png

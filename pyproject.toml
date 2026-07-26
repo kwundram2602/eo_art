@@ -35,6 +35,7 @@ video = [
 install-local = "scripts.install_local:main"
 ship = "scripts.ship:main"
 add-git-ref = "scripts.add_git_ref:main"
+eo-art-f3d = "eo_art.forge3d_pipes.cli:main"
 
 [project.urls]
 Homepage = ""

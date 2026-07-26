@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -27,12 +28,17 @@ def load_raw(
         dotlist.append(f"run.out_dir={out}")
     if dotlist:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(dotlist))
-    return cfg
+    # OmegaConf's stubs type merge/load as `Any | ListConfig | DictConfig`; a
+    # schema-rooted merge is always a mapping, so this is a `DictConfig` in
+    # practice.
+    return cast(DictConfig, cfg)
 
 
 def to_pipeline(cfg: DictConfig) -> PipelineConfig:
     """Convert to dataclasses (running range checks) and validate prep ops."""
-    obj: PipelineConfig = OmegaConf.to_object(cfg)
+    # OmegaConf.to_object's stub returns a broad container union; structured
+    # config rooted at PipelineConfig always yields a PipelineConfig instance.
+    obj = cast(PipelineConfig, OmegaConf.to_object(cfg))
     validate_chain(obj.prepare)
     return obj
 

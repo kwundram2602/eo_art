@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -34,10 +35,14 @@ def _plan(
     """Validate every variant up front, so nothing runs on a broken plan."""
     plan = []
     for variant in variants:
-        merged = (
+        # OmegaConf.merge's stub types its return as `ListConfig | DictConfig`;
+        # merging dotlist overrides onto a DictConfig always yields a
+        # DictConfig in practice.
+        merged = cast(
+            DictConfig,
             OmegaConf.merge(raw, OmegaConf.from_dotlist(list(variant.overrides)))
             if variant.overrides
-            else raw
+            else raw,
         )
         plan.append((variant, merged, to_pipeline(merged)))
     return plan
