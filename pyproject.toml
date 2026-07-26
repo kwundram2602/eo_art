@@ -67,8 +67,8 @@ dev = [
     "ty>=0.0.33",
 ]
 
-[tool.ty]
-src = ["src"]
+[tool.ty.src]
+include = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
