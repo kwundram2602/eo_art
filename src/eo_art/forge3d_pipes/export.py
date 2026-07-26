@@ -10,10 +10,16 @@ FRAME_GLOB = "frame_*.png"
 
 
 def write_resolved_config(cfg: DictConfig, path: Path) -> Path:
-    """Save the fully merged config next to its outputs, for reproducibility."""
+    """Save the fully merged config with interpolations resolved.
+
+    This creates a standalone record of the exact literal values that produced
+    the render, with all ``${...}`` interpolations replaced by their final
+    values. This ensures reproducibility: the file can be loaded and inspected
+    independently without relying on external configuration context.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    OmegaConf.save(cfg, path)
+    OmegaConf.save(cfg, path, resolve=True)
     return path
 
 

@@ -37,6 +37,26 @@ def test_write_resolved_config_creates_parent_dirs(tmp_path):
     assert path.exists()
 
 
+def test_write_resolved_config_resolves_interpolations(tmp_path):
+    """Verify interpolations are resolved to literal values in saved config."""
+    cfg = OmegaConf.create(
+        {
+            "run": {"out_dir": "/output/myrun"},
+            "export": {"video": "${run.out_dir}/video.mp4"},
+        }
+    )
+    path = export.write_resolved_config(cfg, tmp_path / "resolved.yaml")
+
+    # Reloaded config should have the resolved literal value
+    reloaded = OmegaConf.load(path)
+    assert reloaded.export.video == "/output/myrun/video.mp4"
+
+    # Raw file text should not contain the interpolation syntax
+    raw_text = path.read_text()
+    assert "${" not in raw_text
+    assert "/output/myrun/video.mp4" in raw_text
+
+
 def test_collect_frames_is_sorted(frames_dir):
     frames = export.collect_frames(frames_dir)
     assert [f.name for f in frames] == [
