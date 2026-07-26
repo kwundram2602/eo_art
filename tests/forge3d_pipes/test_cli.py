@@ -54,6 +54,14 @@ def test_sweep_shorthand_becomes_an_override(captured_run, cfg_path):
     ]
 
 
+def test_malformed_sweep_is_a_clean_error(cfg_path, capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["run", str(cfg_path), "--sweep", "badvalue"])
+    assert exc_info.value.code != 0
+    stderr = capsys.readouterr().err
+    assert "--sweep expects 'dotted.path=v1,v2'" in stderr
+
+
 def test_no_cache_flag_disables_caching(captured_run, cfg_path):
     cli.main(["run", str(cfg_path), "--no-cache"])
     assert captured_run["use_cache"] is False

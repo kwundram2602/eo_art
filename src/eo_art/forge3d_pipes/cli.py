@@ -37,6 +37,7 @@ def _parser() -> argparse.ArgumentParser:
     run_cmd.add_argument(
         "--sweep",
         default=None,
+        type=_sweep_to_override,
         metavar="PATH=V1,V2",
         help="shorthand for a single-parameter sweep",
     )
@@ -54,7 +55,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     overrides = list(args.overrides)
     if args.sweep:
-        overrides.append(_sweep_to_override(args.sweep))
+        overrides.append(args.sweep)
 
     results = run(
         args.configs,

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import forge3d as f3d
+from forge3d.viewer import open_viewer_async
 
 from eo_art.forge3d_pipes.config.schema import AnimationKind, PipelineConfig
 from eo_art.forge3d_pipes.render.animation import build_camera_animation
@@ -24,10 +24,7 @@ class RenderResult:
 
 def _open_viewer(cfg: PipelineConfig, terrain_path: Path) -> Any:
     """Indirection point so tests can substitute a fake viewer."""
-    # forge3d's __init__.pyi re-imports open_viewer_async without an `as`
-    # alias or __all__ entry, so per PEP 484 stub rules type checkers treat
-    # it as private even though it is documented and works at runtime.
-    return f3d.open_viewer_async(  # ty: ignore[unresolved-attribute]
+    return open_viewer_async(
         terrain_path=str(terrain_path),
         width=cfg.render.width,
         height=cfg.render.height,
