@@ -68,6 +68,7 @@ def test_input_path_is_mandatory():
         (["render.pbr.height_ao.resolution_scale=1.5"], "resolution_scale"),
         (["render.width=0"], "render.width"),
         (["animation.fps=0"], "animation.fps"),
+        (["animation.fps=2", "animation.orbit.duration=0.1"], "frame interval"),
     ],
 )
 def test_range_validation_rejects_bad_values(dotlist, message):

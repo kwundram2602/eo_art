@@ -36,6 +36,7 @@ def orbit_keyframes(orbit: Orbit, fps: int) -> list[Keyframe]:
     radius_end = orbit.radius_start if orbit.radius_end is None else orbit.radius_end
     fov_end = orbit.fov_start if orbit.fov_end is None else orbit.fov_end
 
+    # Animation.__post_init__ guarantees count >= 1, so division is safe.
     count = int(round(orbit.duration * fps))
     return [
         Keyframe(

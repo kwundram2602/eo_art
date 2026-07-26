@@ -223,6 +223,13 @@ class Animation:
 
     def __post_init__(self) -> None:
         _positive("animation.fps", self.fps)
+        frames = round(self.orbit.duration * self.fps)
+        if frames < 1:
+            raise ValueError(
+                f"animation.orbit.duration ({self.orbit.duration}) x "
+                f"animation.fps ({self.fps}) must yield at least 1 frame interval, "
+                f"got {frames}"
+            )
 
 
 @dataclass

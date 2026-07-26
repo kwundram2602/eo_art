@@ -177,6 +177,7 @@ def test_input_path_is_mandatory():
         (["render.pbr.height_ao.resolution_scale=1.5"], "resolution_scale"),
         (["render.width=0"], "render.width"),
         (["animation.fps=0"], "animation.fps"),
+        (["animation.fps=2", "animation.orbit.duration=0.1"], "frame interval"),
     ],
 )
 def test_range_validation_rejects_bad_values(dotlist, message):
@@ -424,6 +425,13 @@ class Animation:
 
     def __post_init__(self) -> None:
         _positive("animation.fps", self.fps)
+        frames = round(self.orbit.duration * self.fps)
+        if frames < 1:
+            raise ValueError(
+                f"animation.orbit.duration ({self.orbit.duration}) x "
+                f"animation.fps ({self.fps}) must yield at least 1 frame interval, "
+                f"got {frames}"
+            )
 
 
 @dataclass
@@ -1670,6 +1678,7 @@ def orbit_keyframes(orbit: Orbit, fps: int) -> list[Keyframe]:
     radius_end = orbit.radius_start if orbit.radius_end is None else orbit.radius_end
     fov_end = orbit.fov_start if orbit.fov_end is None else orbit.fov_end
 
+    # Animation.__post_init__ guarantees count >= 1, so division is safe.
     count = int(round(orbit.duration * fps))
     return [
         Keyframe(
