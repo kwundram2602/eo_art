@@ -2431,7 +2431,9 @@ def test_sweep_produces_one_directory_per_variant(config_file, fake_render, tmp_
     assert all(r.out_dir.exists() for r in results)
 
 
-def test_prep_is_cached_across_sweep_variants(config_file, fake_render, monkeypatch):
+def test_prep_is_cached_across_sweep_variants(
+    config_file, fake_render, monkeypatch, tmp_path
+):
     calls = []
     original = pipeline.run_prep_chain
 
@@ -2447,6 +2449,8 @@ def test_prep_is_cached_across_sweep_variants(config_file, fake_render, monkeypa
     # Called once per variant, but the underlying reprojection is cached,
     # so only one output file exists.
     assert len(calls) == 3
+    cache = tmp_path / "out" / "test" / "_prep"
+    assert len(list(cache.glob("*.tif"))) == 1
 
 
 def test_failing_variant_is_recorded_and_others_continue(
