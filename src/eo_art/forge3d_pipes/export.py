@@ -28,12 +28,14 @@ def collect_frames(frames_dir: Path) -> list[Path]:
     return sorted(Path(frames_dir).glob(FRAME_GLOB))
 
 
-def _write_frames(frames: list[Path], out_path: Path, fps: int, quality: int) -> None:
+def _write_frames(
+    frames: list[Path], out_path: Path, fps: int, quality: int, is_gif: bool
+) -> None:
     """Isolated so tests can simulate a missing encoder backend."""
     import imageio.v3 as iio
 
     images = [iio.imread(frame) for frame in frames]
-    if out_path.suffix == ".gif":
+    if is_gif:
         iio.imwrite(out_path, images, duration=1000 / fps, loop=0)
     else:
         iio.imwrite(out_path, images, fps=fps, quality=quality)
@@ -48,7 +50,13 @@ def encode_video(frames_dir: Path, out_path: Path, video: Video) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        _write_frames(frames, out_path, video.fps, video.quality)
+        _write_frames(
+            frames,
+            out_path,
+            video.fps,
+            video.quality,
+            is_gif=video.format is VideoFormat.gif,
+        )
     except ImportError as exc:
         hint = (
             "install the optional video extra: uv add 'eo-art[video]'"

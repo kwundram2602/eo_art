@@ -55,4 +55,22 @@ def expand(sweep: Sweep | None) -> list[Variant]:
     else:
         combinations = itertools.product(*value_lists)
 
-    return [_variant(paths, values) for values in combinations]
+    return _deduplicate([_variant(paths, values) for values in combinations])
+
+
+def _deduplicate(variants: list[Variant]) -> list[Variant]:
+    """Suffix repeated names so no two variants share an output directory.
+
+    Slugging maps every unsafe character to ``_``, so distinct values such as
+    ``a b`` and ``a_b`` can produce the same name. Without this, the second
+    variant would silently overwrite the first.
+    """
+    seen: dict[str, int] = {}
+    unique = []
+    for variant in variants:
+        count = seen.get(variant.name, 0)
+        seen[variant.name] = count + 1
+        if count:
+            variant = Variant(f"{variant.name}-{count + 1}", variant.overrides)
+        unique.append(variant)
+    return unique

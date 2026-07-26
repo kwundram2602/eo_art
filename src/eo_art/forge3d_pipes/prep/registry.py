@@ -30,7 +30,13 @@ _OPS: dict[str, RegisteredOp] = {}
 
 
 def register_op(name: str, schema: type) -> Callable[[F], F]:
-    """Register a prep op under ``name`` with its parameter dataclass."""
+    """Register a prep op under ``name`` with its parameter dataclass.
+
+    An op has the signature ``(src, dst, cfg) -> Path`` and must return the
+    path it wrote, normally ``dst``. Returning ``src`` unchanged is supported
+    and means "this op was a no-op"; the chain will copy rather than move in
+    that case, so the caller's source raster is never relocated.
+    """
 
     def decorator(func: F) -> F:
         if name in _OPS:
@@ -96,6 +102,10 @@ def run_prep_chain(
     Returns ``src`` unchanged when the chain is empty. Intermediates are
     written to a temporary directory and only the final result is promoted
     into the cache, so a failing op leaves no partial cache entry.
+
+    If every op was a no-op (the chain's final path is still the source), the
+    source is copied into the cache rather than moved — moving would relocate
+    the caller's raster out of its original location.
     """
     src = Path(src)
     if not entries:
@@ -113,5 +123,8 @@ def run_prep_chain(
             op, cfg = validate_entry(entry)
             dst = Path(tmp) / f"{index:02d}_{op.name}.tif"
             current = Path(op.func(current, dst, cfg))
-        shutil.move(str(current), final)
+        if current.resolve() == src.resolve():
+            shutil.copy2(current, final)
+        else:
+            shutil.move(str(current), final)
     return final

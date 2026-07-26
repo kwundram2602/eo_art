@@ -1795,7 +1795,7 @@ def test_zip_rejects_length_mismatch():
 
 def test_variant_names_describe_their_params():
     variants = expand(
-        Sweep(params={"render.pbr.tonemap.exposure": [1.35], "render.camera.phi": [280]})
+        Sweep(params={"render.pbr.exposure": [1.35], "render.camera.phi": [280]})
     )
     assert variants[0].name == "exposure=1.35__phi=280"
 

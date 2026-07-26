@@ -39,7 +39,10 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         type=_sweep_to_override,
         metavar="PATH=V1,V2",
-        help="shorthand for a single-parameter sweep",
+        help=(
+            "add a swept parameter; combines with any sweep already defined "
+            "in the config files rather than replacing it"
+        ),
     )
     run_cmd.add_argument(
         "--no-cache", action="store_true", help="recompute the prep chain"
@@ -61,7 +64,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.configs,
         overrides=overrides,
         out=args.out,
-        use_cache=not args.no_cache,
+        use_cache=False if args.no_cache else None,
         fail_fast=args.fail_fast or None,
     )
 

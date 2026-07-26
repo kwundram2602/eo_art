@@ -35,6 +35,8 @@ class ScaleToGsdCfg:
 def reproject(src: Path, dst: Path, cfg: ReprojectCfg) -> Path:
     """Reproject a raster to ``cfg.crs``, preserving all bands."""
     with rasterio.open(src) as source:
+        if source.crs is None:
+            raise ValueError(f"{src} has no CRS; cannot reproject")
         transform, width, height = calculate_default_transform(
             source.crs, cfg.crs, source.width, source.height, *source.bounds
         )

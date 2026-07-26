@@ -85,3 +85,53 @@ def test_input_path_missing_sentinel_is_omegaconf_missing():
     assert (
         PipelineConfig.__dataclass_fields__["input"].default_factory().path == MISSING
     )
+
+
+@pytest.mark.parametrize(
+    ("dotlist", "message"),
+    [
+        (["animation.orbit.fov_start=300"], "orbit.fov_start"),
+        (["animation.orbit.theta_start=120"], "orbit.theta_start"),
+        (["animation.orbit.theta_end=120"], "orbit.theta_end"),
+        (["animation.orbit.fov_end=0"], "orbit.fov_end"),
+        (["animation.orbit.radius_end=0"], "orbit.radius_end"),
+    ],
+)
+def test_orbit_angles_are_validated_like_camera(dotlist, message):
+    """Orbit must not bypass the ranges Camera enforces on the same knobs."""
+    merged = OmegaConf.merge(
+        _base(), {"input": {"path": "dem.tif"}}, OmegaConf.from_dotlist(dotlist)
+    )
+    with pytest.raises(ValueError, match=message):
+        OmegaConf.to_object(merged)
+
+
+def test_orbit_optional_end_values_may_stay_none():
+    cfg = OmegaConf.to_object(OmegaConf.merge(_base(), {"input": {"path": "dem.tif"}}))
+    assert cfg.animation.orbit.theta_end is None
+    assert cfg.animation.orbit.fov_end is None
+    assert cfg.animation.orbit.radius_end is None
+
+
+def test_video_export_without_animation_is_rejected():
+    """A still render produces no frames, so there would be nothing to encode."""
+    merged = OmegaConf.merge(
+        _base(),
+        {"input": {"path": "dem.tif"}},
+        OmegaConf.from_dotlist(["export.video.enabled=true", "animation.kind=none"]),
+    )
+    with pytest.raises(ValueError, match="requires an animation"):
+        OmegaConf.to_object(merged)
+
+
+def test_video_export_with_animation_is_accepted():
+    cfg = OmegaConf.to_object(
+        OmegaConf.merge(
+            _base(),
+            {"input": {"path": "dem.tif"}},
+            OmegaConf.from_dotlist(
+                ["export.video.enabled=true", "animation.kind=orbit"]
+            ),
+        )
+    )
+    assert cfg.export.video.enabled is True

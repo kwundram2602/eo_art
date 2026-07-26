@@ -68,10 +68,15 @@ def run(
     configs: Sequence[str | Path],
     overrides: Sequence[str] = (),
     out: str | Path | None = None,
-    use_cache: bool = True,
+    use_cache: bool | None = None,
     fail_fast: bool | None = None,
 ) -> list[VariantResult]:
-    """Load, validate, and execute the pipeline for every sweep variant."""
+    """Load, validate, and execute the pipeline for every sweep variant.
+
+    ``use_cache`` and ``fail_fast`` default to ``None``, meaning "use the
+    value from ``run.cache`` / ``run.fail_fast`` in the config"; an explicit
+    boolean overrides the config.
+    """
     raw = load_raw(configs, overrides, out)
     root = to_pipeline(raw)
 
@@ -84,12 +89,13 @@ def run(
     run_root = Path(root.run.out_dir) / root.run.name
     cache_dir = run_root / PREP_CACHE_DIRNAME
     abort_on_error = root.run.fail_fast if fail_fast is None else fail_fast
+    cache_enabled = root.run.cache if use_cache is None else use_cache
 
     results: list[VariantResult] = []
     for variant, merged, cfg in plan:
         out_dir = run_root / variant.name
         try:
-            rendered = _run_variant(cfg, merged, out_dir, cache_dir, use_cache)
+            rendered = _run_variant(cfg, merged, out_dir, cache_dir, cache_enabled)
             video = None
             if cfg.export.video.enabled and rendered.frames_dir is not None:
                 video = encode_video(

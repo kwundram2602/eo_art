@@ -71,3 +71,26 @@ def test_chain_of_both_ops_runs(synthetic_dem, tmp_path):
         # raster the achieved GSD deviates from the target by a few percent:
         # here 12x18 pixels over a 2477x3621m extent yields ~206m, not 200m.
         assert src.res[0] == pytest.approx(200.0, rel=0.05)
+
+
+def test_reproject_rejects_a_raster_without_a_crs(tmp_path):
+    """A CRS-less DEM is plausible first-contact input; fail clearly, not opaquely."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    src = tmp_path / "no_crs.tif"
+    with rasterio.open(
+        src,
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=1,
+        dtype="float32",
+        transform=from_origin(100.0, 200.0, 10.0, 10.0),
+    ) as dst:
+        dst.write(np.ones((8, 8), dtype="float32"), 1)
+
+    with pytest.raises(ValueError, match="has no CRS"):
+        ops.reproject(src, tmp_path / "out.tif", ops.ReprojectCfg(crs="EPSG:32610"))

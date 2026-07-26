@@ -158,7 +158,7 @@ Both paths call the same function:
 
 ```bash
 eo-art-f3d run configs/base.yaml configs/looks/alpine_dusk.yaml \
-    --set render.camera.phi=280 --set render.pbr.tonemap.exposure=1.6 \
+    --set render.camera.phi=280 --set render.pbr.exposure=1.6 \
     --out out/
 ```
 
@@ -179,12 +179,12 @@ Sweeps live in the config, with a CLI shorthand:
 sweep:
   mode: product          # product | zip
   params:
-    render.pbr.tonemap.exposure: [1.0, 1.35, 1.8]
+    render.pbr.exposure: [1.0, 1.35, 1.8]
     render.camera.phi: [280, 300]
 ```
 
 ```bash
---sweep render.pbr.tonemap.exposure=1.0,1.35,1.8
+--sweep render.pbr.exposure=1.0,1.35,1.8
 ```
 
 ## Execution

@@ -213,6 +213,16 @@ class Orbit:
     def __post_init__(self) -> None:
         _positive("orbit.duration", self.duration)
         _positive("orbit.radius_start", self.radius_start)
+        # The same angles Camera constrains, so an out-of-range orbit is
+        # rejected at load rather than reaching the viewer.
+        _in_range("orbit.theta_start", self.theta_start, 0.0, 90.0)
+        _in_range("orbit.fov_start", self.fov_start, 1.0, 179.0)
+        if self.theta_end is not None:
+            _in_range("orbit.theta_end", self.theta_end, 0.0, 90.0)
+        if self.fov_end is not None:
+            _in_range("orbit.fov_end", self.fov_end, 1.0, 179.0)
+        if self.radius_end is not None:
+            _positive("orbit.radius_end", self.radius_end)
 
 
 @dataclass
@@ -277,3 +287,13 @@ class PipelineConfig:
     animation: Animation = field(default_factory=Animation)
     export: Export = field(default_factory=Export)
     sweep: Sweep | None = None
+
+    def __post_init__(self) -> None:
+        # A still render produces no frame sequence, so there would be nothing
+        # to encode. Catch it at load rather than finishing green with no video.
+        if self.export.video.enabled and self.animation.kind is AnimationKind.none:
+            raise ValueError(
+                "export.video.enabled requires an animation, but "
+                "animation.kind is 'none'; set animation.kind=orbit or "
+                "disable export.video.enabled"
+            )

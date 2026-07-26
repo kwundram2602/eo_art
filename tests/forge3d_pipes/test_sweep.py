@@ -52,9 +52,7 @@ def test_zip_rejects_length_mismatch():
 
 def test_variant_names_describe_their_params():
     variants = expand(
-        Sweep(
-            params={"render.pbr.tonemap.exposure": [1.35], "render.camera.phi": [280]}
-        )
+        Sweep(params={"render.pbr.exposure": [1.35], "render.camera.phi": [280]})
     )
     assert variants[0].name == "exposure=1.35__phi=280"
 
@@ -72,3 +70,18 @@ def test_variant_names_are_unique():
 def test_non_list_value_is_rejected():
     with pytest.raises(ValueError, match="must be a list"):
         expand(Sweep(params={"render.camera.phi": 10}))
+
+
+def test_slug_aliasing_collisions_get_unique_names():
+    """`a b` and `a_b` slug identically; variants must not share a directory."""
+    variants = expand(Sweep(params={"input.path": ["a b", "a_b"]}))
+    assert len(variants) == 2
+    assert len({v.name for v in variants}) == 2
+    # Overrides stay faithful to the original values.
+    assert variants[0].overrides == ("input.path=a b",)
+    assert variants[1].overrides == ("input.path=a_b",)
+
+
+def test_duplicate_values_in_one_list_get_unique_names():
+    variants = expand(Sweep(params={"render.camera.phi": [10, 10]}))
+    assert len({v.name for v in variants}) == 2

@@ -89,3 +89,22 @@ def test_failed_op_leaves_no_cache_file(monkeypatch, source, tmp_path):
     with pytest.raises(RuntimeError, match="op exploded"):
         registry.run_prep_chain(source, [{"op": "boom"}], cache)
     assert list(cache.glob("*.tif")) == []
+
+
+def test_passthrough_op_returning_src_does_not_move_the_source(
+    monkeypatch, source, tmp_path
+):
+    """An op may return `src` to mean "no-op"; that must never relocate it."""
+    monkeypatch.setattr(registry, "_OPS", {})
+
+    @registry.register_op("passthrough", CountCfg)
+    def _passthrough(src: Path, dst: Path, cfg: CountCfg) -> Path:
+        return src
+
+    cache = tmp_path / "cache"
+    result = registry.run_prep_chain(source, [{"op": "passthrough"}], cache)
+
+    assert source.exists(), "source raster must not be moved into the cache"
+    assert source.read_text() == "dem"
+    assert result.exists() and result != source
+    assert result.read_text() == "dem"

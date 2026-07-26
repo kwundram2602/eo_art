@@ -154,3 +154,92 @@ def test_bad_config_fails_before_any_variant_runs(tmp_path, synthetic_dem, monke
     )
     with pytest.raises(ValueError, match="camera.fov"):
         pipeline.run([path])
+
+
+def test_run_cache_false_in_config_disables_caching(
+    config_file, fake_render, monkeypatch, tmp_path
+):
+    """`run.cache: false` in YAML must actually reach run_prep_chain."""
+    seen = []
+    original = pipeline.run_prep_chain
+
+    def _spy(src, entries, cache_dir, use_cache=True):
+        seen.append(use_cache)
+        return original(src, entries, cache_dir, use_cache)
+
+    monkeypatch.setattr(pipeline, "run_prep_chain", _spy)
+
+    pipeline.run([config_file])
+    assert seen == [True]  # schema default
+
+    seen.clear()
+    pipeline.run([config_file], overrides=["run.cache=false"])
+    assert seen == [False]
+
+
+def test_explicit_use_cache_argument_overrides_config(
+    config_file, fake_render, monkeypatch
+):
+    seen = []
+    original = pipeline.run_prep_chain
+
+    def _spy(src, entries, cache_dir, use_cache=True):
+        seen.append(use_cache)
+        return original(src, entries, cache_dir, use_cache)
+
+    monkeypatch.setattr(pipeline, "run_prep_chain", _spy)
+    pipeline.run([config_file], overrides=["run.cache=false"], use_cache=True)
+    assert seen == [True]
+
+
+def test_cli_sweep_composes_with_config_sweep(config_file, fake_render, tmp_path):
+    """--sweep adds a parameter to a config-defined sweep, it does not replace it."""
+    results = pipeline.run(
+        [config_file],
+        overrides=[
+            "sweep.params={render.camera.phi: [10, 20]}",
+            "sweep.params={render.pbr.exposure: [1.0, 2.0]}",
+        ],
+    )
+    assert len(results) == 4
+    assert all(r.ok for r in results)
+    assert {r.name for r in results} == {
+        "phi=10__exposure=1.0",
+        "phi=10__exposure=2.0",
+        "phi=20__exposure=1.0",
+        "phi=20__exposure=2.0",
+    }
+
+
+def test_video_export_is_wired_end_to_end(config_file, monkeypatch, tmp_path):
+    """The frames_dir -> encode_video handoff and video filename construction."""
+    import imageio.v3 as iio
+    import numpy as np
+
+    def _render(cfg, terrain_path, out_dir):
+        frames_dir = out_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        for index in range(3):
+            iio.imwrite(
+                frames_dir / f"frame_{index:04d}.png",
+                np.full((8, 8, 3), index * 80, dtype=np.uint8),
+            )
+        return RenderResult(frames_dir=frames_dir)
+
+    monkeypatch.setattr(pipeline, "render", _render)
+
+    results = pipeline.run(
+        [config_file],
+        overrides=[
+            "animation.kind=orbit",
+            "animation.fps=3",
+            "animation.orbit.duration=1.0",
+            "export.video.enabled=true",
+            "export.video.format=gif",
+            "export.video.fps=3",
+        ],
+    )
+    assert len(results) == 1 and results[0].ok
+    assert results[0].video is not None
+    assert results[0].video.name == "video.gif"
+    assert results[0].video.exists() and results[0].video.stat().st_size > 0
