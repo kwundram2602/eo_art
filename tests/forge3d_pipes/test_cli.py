@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -139,6 +141,19 @@ def test_acquire_command_prints_paths(fake_acquire_stage, tmp_path, capsys):
     assert str(fake_acquire_stage["optical_path"]) in output
 
 
+def test_acquire_command_without_out_flag_passes_none_through(
+    fake_acquire_stage, tmp_path
+):
+    """No --out means '_run_acquire_stage' decides -- from the acquire config's
+    own out_dir, not a CLI-level default."""
+    acquire_cfg = tmp_path / "acquire.yaml"
+    acquire_cfg.write_text("aoi_path: aoi.gpkg\n")
+
+    cli.main(["acquire", str(acquire_cfg)])
+
+    assert fake_acquire_stage["out_dir"] is None
+
+
 def test_acquire_command_no_cache_flag(fake_acquire_stage, tmp_path):
     acquire_cfg = tmp_path / "acquire.yaml"
     acquire_cfg.write_text("aoi_path: aoi.gpkg\n")
@@ -208,3 +223,43 @@ def test_run_with_acquire_overlay_selects_named_overlay(
         f"input.path={fake_acquire_stage['dtm_path']}",
         f"overlays.1.path={fake_acquire_stage['optical_path']}",
     ]
+
+
+def test_run_acquire_stage_falls_back_to_configs_own_out_dir(monkeypatch, tmp_path):
+    """Exercises the real `_run_acquire_stage`, not the fixture's stand-in,
+    to confirm the CLI-level --out is genuinely optional."""
+    import eo_art.forge3d_pipes.acquire as acquire_pkg
+
+    seen = {}
+
+    def _fake_run_acquire(cfg, out_dir, use_cache=True):
+        seen["out_dir"] = out_dir
+        return acquire_pkg.AcquireResult(
+            dtm_path=Path(out_dir) / "dtm.tif",
+            optical_path=Path(out_dir) / "optical_aligned.tif",
+        )
+
+    monkeypatch.setattr(acquire_pkg, "run_acquire", _fake_run_acquire)
+
+    acquire_cfg = tmp_path / "acquire.yaml"
+    acquire_cfg.write_text(
+        yaml.safe_dump(
+            {
+                "aoi_path": "aoi.gpkg",
+                "ee_project": "ee-test",
+                "sentinel_sr_dir": "../sentinel_sr",
+                "sentinel": {
+                    "start_date": "2023-01-01",
+                    "end_date": "2023-12-31",
+                    "model_path": "/models/LDSRS2-SEN2SR",
+                },
+                "out_dir": "configured_out",
+            }
+        )
+    )
+
+    cli._run_acquire_stage(str(acquire_cfg), None, True)
+    assert seen["out_dir"] == "configured_out"
+
+    cli._run_acquire_stage(str(acquire_cfg), "cli_override", True)
+    assert seen["out_dir"] == "cli_override"

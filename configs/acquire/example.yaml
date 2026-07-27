@@ -1,10 +1,11 @@
 # Fetches terrain + optical inputs for a render. Run standalone with
-# `eo-art-f3d acquire configs/acquire/example.yaml --out out`, or chained
-# ahead of a render with `eo-art-f3d run <render-config> --acquire
-# configs/acquire/example.yaml`.
+# `eo-art-f3d acquire configs/acquire/example.yaml`, or chained ahead of a
+# render with `eo-art-f3d run <render-config> --acquire
+# configs/acquire/example.yaml`. --out overrides out_dir below either way.
 
 aoi_path: aoi.gpkg   # override with --set aoi_path=...
 ee_project: your-ee-project
+out_dir: out
 
 # Path to a local checkout of the sentinel_sr project (it ships its own
 # torch/cubo/mlstac stack in an isolated venv rather than eo-art's).

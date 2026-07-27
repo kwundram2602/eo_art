@@ -31,6 +31,7 @@ def test_defaults():
     assert cfg.align.resampling.value == "bilinear"
     assert cfg.sentinel.reference_index is None
     assert cfg.sentinel.collection == "sentinel-2-l2a"
+    assert cfg.out_dir == "out"
 
 
 def test_missing_required_field_fails():

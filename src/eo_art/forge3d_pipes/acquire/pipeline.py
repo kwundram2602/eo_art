@@ -28,7 +28,11 @@ class AcquireResult:
 
 
 def _cache_key(cfg: AcquireConfig) -> str:
-    blob = json.dumps(asdict(cfg), sort_keys=True, default=str).encode()
+    # out_dir says where to store results, not what to compute -- excluded so
+    # moving the output location doesn't invalidate an otherwise-identical
+    # cached result (or, worse, silently redo an expensive GPU+network run).
+    payload = {k: v for k, v in asdict(cfg).items() if k != "out_dir"}
+    blob = json.dumps(payload, sort_keys=True, default=str).encode()
     return hashlib.sha256(blob).hexdigest()[:16]
 
 

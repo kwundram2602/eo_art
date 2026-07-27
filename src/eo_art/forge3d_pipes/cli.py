@@ -78,7 +78,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     acquire_cmd.add_argument("config", help="acquire config file")
     acquire_cmd.add_argument(
-        "--out", default="out", help="directory to write/cache acquire outputs under"
+        "--out",
+        default=None,
+        help="directory to write/cache acquire outputs under "
+        "(default: out_dir from the acquire config)",
     )
     acquire_cmd.add_argument(
         "--no-cache", action="store_true", help="rerun even if cached outputs exist"
@@ -86,7 +89,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_acquire_stage(acquire_config: str, out_dir: str, use_cache: bool):
+def _run_acquire_stage(acquire_config: str, out_dir: str | None, use_cache: bool):
     from typing import cast
 
     from omegaconf import OmegaConf
@@ -98,7 +101,7 @@ def _run_acquire_stage(acquire_config: str, out_dir: str, use_cache: bool):
         OmegaConf.structured(AcquireConfig), OmegaConf.load(acquire_config)
     )
     cfg = cast(AcquireConfig, OmegaConf.to_object(raw))
-    return run_acquire(cfg, out_dir, use_cache=use_cache)
+    return run_acquire(cfg, out_dir or cfg.out_dir, use_cache=use_cache)
 
 
 def _run_command(args: argparse.Namespace) -> int:
@@ -108,7 +111,7 @@ def _run_command(args: argparse.Namespace) -> int:
 
     if args.acquire:
         result = _run_acquire_stage(
-            args.acquire, args.out or "out", use_cache=not args.acquire_no_cache
+            args.acquire, args.out, use_cache=not args.acquire_no_cache
         )
         overrides.append(f"input.path={result.dtm_path}")
         overlay_index = 0

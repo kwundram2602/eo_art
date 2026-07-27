@@ -205,3 +205,12 @@ def test_different_config_gets_a_different_cache_key(monkeypatch, tmp_path):
     pipeline.run_acquire(_cfg(dem={"scale": 10}), out_dir, use_cache=True)
 
     assert len(calls) == 10
+
+
+def test_out_dir_is_not_part_of_the_cache_key(monkeypatch, tmp_path):
+    """A config that only differs in out_dir must produce the same cache key,
+    or moving --out (or just adding the out_dir field to the schema, as
+    happened once) silently forces an expensive GPU+network recompute."""
+    cfg_a = _cfg(out_dir="out_a")
+    cfg_b = _cfg(out_dir="out_b")
+    assert pipeline._cache_key(cfg_a) == pipeline._cache_key(cfg_b)

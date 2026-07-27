@@ -74,6 +74,9 @@ class Align:
 class AcquireConfig:
     aoi_path: str = MISSING
     ee_project: str = MISSING
+    # Where dtm.tif/optical_aligned.tif land (plus the internal _acquire
+    # cache). Overridden by --out on the CLI when given.
+    out_dir: str = "out"
     # Path to a local checkout of the `sentinel_sr` project (it ships its own
     # torch/cubo/mlstac stack in an isolated venv, so it can't be bundled
     # inside eo-art's own wheel/site-packages install; run_sentinel_sr shells
