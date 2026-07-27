@@ -82,17 +82,22 @@ def test_run_acquire_chains_steps_in_order(monkeypatch, tmp_path):
     ]
     assert result.dtm_path.exists()
     assert result.optical_path.exists()
+    # the returned paths are stable, directly under out_dir -- not buried in
+    # the internal _acquire/<hash> cache directory.
+    assert result.dtm_path == tmp_path / "out" / "dtm.tif"
+    assert result.optical_path == tmp_path / "out" / "optical_aligned.tif"
 
     # the DTM must be super-resolved from the raw DEM + reference scene...
     _, dem, optical, dtm_out, _ = calls[3]
     assert dem.name == "dem.tif"
     assert optical.name == "scene0.tif"
-    assert dtm_out == result.dtm_path
+    assert dtm_out.name == result.dtm_path.name
+    assert "_acquire" in str(dtm_out)  # written to the cache, then copied out
     # ...and the optical scene aligned onto *that* DTM's grid, not the raw DEM.
     _, reference, target, optical_out, resampling = calls[4]
-    assert reference == result.dtm_path
+    assert reference == dtm_out
     assert target.name == "scene0.tif"
-    assert optical_out == result.optical_path
+    assert optical_out.name == result.optical_path.name
     assert resampling == "bilinear"
 
 
@@ -176,6 +181,8 @@ def test_cache_hit_skips_all_steps(monkeypatch, tmp_path):
     second = pipeline.run_acquire(cfg, out_dir, use_cache=True)
     assert len(calls) == 5  # no new calls
     assert second == first
+    assert second.dtm_path.exists()
+    assert second.optical_path.exists()
 
 
 def test_no_cache_reruns_even_with_prior_result(monkeypatch, tmp_path):

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -55,48 +56,62 @@ def _select_reference(scenes: list[Scene], reference_index: int | None) -> Path:
 def run_acquire(
     cfg: AcquireConfig, out_dir: str | Path, use_cache: bool = True
 ) -> AcquireResult:
-    """Run the acquire chain, caching the final DTM/optical pair by config hash."""
-    cache_dir = Path(out_dir) / CACHE_DIRNAME / _cache_key(cfg)
-    dtm_path = cache_dir / DTM_FILENAME
-    optical_path = cache_dir / OPTICAL_FILENAME
+    """Run the acquire chain, caching the final DTM/optical pair by config hash.
 
-    if use_cache and dtm_path.exists() and optical_path.exists():
-        return AcquireResult(dtm_path=dtm_path, optical_path=optical_path)
+    The cache lives under ``<out_dir>/_acquire/<hash>`` (so re-running with an
+    unchanged config skips recomputation) but the returned paths are always
+    the stable ``<out_dir>/dtm.tif`` / ``<out_dir>/optical_aligned.tif`` --
+    matching how the render pipeline's own ``_prep`` cache stays internal
+    while its final artifacts land directly in the given out_dir.
+    """
+    out_dir = Path(out_dir)
+    cache_dir = out_dir / CACHE_DIRNAME / _cache_key(cfg)
+    cached_dtm = cache_dir / DTM_FILENAME
+    cached_optical = cache_dir / OPTICAL_FILENAME
+    final_dtm = out_dir / DTM_FILENAME
+    final_optical = out_dir / OPTICAL_FILENAME
 
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    if not (use_cache and cached_dtm.exists() and cached_optical.exists()):
+        cache_dir.mkdir(parents=True, exist_ok=True)
 
-    lat, lon = read_aoi_center(cfg.aoi_path)
-    written = run_sentinel_sr(
-        cfg.sentinel, cfg.sentinel_sr_dir, lat, lon, cache_dir / "sentinel"
-    )
-    if not written:
-        raise RuntimeError(
-            f"sentinel_sr wrote no scenes for aoi={cfg.aoi_path!r} "
-            f"in [{cfg.sentinel.start_date}, {cfg.sentinel.end_date}]"
+        lat, lon = read_aoi_center(cfg.aoi_path)
+        written = run_sentinel_sr(
+            cfg.sentinel, cfg.sentinel_sr_dir, lat, lon, cache_dir / "sentinel"
         )
-    reference_tif = _select_reference(written, cfg.sentinel.reference_index)
+        if not written:
+            raise RuntimeError(
+                f"sentinel_sr wrote no scenes for aoi={cfg.aoi_path!r} "
+                f"in [{cfg.sentinel.start_date}, {cfg.sentinel.end_date}]"
+            )
+        reference_tif = _select_reference(written, cfg.sentinel.reference_index)
 
-    raw_dem = fetch_terrain_dem(
-        reference_tif,
-        cache_dir,
-        source=cfg.dem.source,
-        ee_project=cfg.ee_project,
-        scale=cfg.dem.scale,
-    )
+        raw_dem = fetch_terrain_dem(
+            reference_tif,
+            cache_dir,
+            source=cfg.dem.source,
+            ee_project=cfg.ee_project,
+            scale=cfg.dem.scale,
+        )
 
-    super_resolve_dtm(
-        raw_dem,
-        reference_tif,
-        dtm_path,
-        band=cfg.dtm.band,
-        radius=cfg.dtm.radius,
-        eps=cfg.dtm.eps,
-        apply_erosion=cfg.dtm.apply_erosion,
-        erosion_kwargs=cfg.dtm.erosion_kwargs or None,
-    )
+        super_resolve_dtm(
+            raw_dem,
+            reference_tif,
+            cached_dtm,
+            band=cfg.dtm.band,
+            radius=cfg.dtm.radius,
+            eps=cfg.dtm.eps,
+            apply_erosion=cfg.dtm.apply_erosion,
+            erosion_kwargs=cfg.dtm.erosion_kwargs or None,
+        )
 
-    align_raster_grid(
-        dtm_path, reference_tif, optical_path, resampling=cfg.align.resampling.value
-    )
+        align_raster_grid(
+            cached_dtm,
+            reference_tif,
+            cached_optical,
+            resampling=cfg.align.resampling.value,
+        )
 
-    return AcquireResult(dtm_path=dtm_path, optical_path=optical_path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(cached_dtm, final_dtm)
+    shutil.copy2(cached_optical, final_optical)
+    return AcquireResult(dtm_path=final_dtm, optical_path=final_optical)
