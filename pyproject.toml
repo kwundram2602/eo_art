@@ -30,6 +30,11 @@ neural    = ["torch>=2.0", "torchvision>=0.15"]
 video = [
     "imageio-ffmpeg>=0.6.0",
 ]
+# Needed by forge3d_pipes.acquire (terrain fetch via Earth Engine). The
+# sentinel-2 super-resolution step in that same stage runs in the separate
+# sentinel_sr/ project instead, since its torch/cubo/mlstac stack would
+# otherwise conflict with the rest of eo-art's dependencies.
+acquire = ["geets", "geemap>=0.37.2"]
 
 [project.scripts]
 install-local = "scripts.install_local:main"
@@ -66,6 +71,8 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.15.12",
     "ty>=0.0.33",
+    "geets",
+    "geemap>=0.37.2",
 ]
 
 [tool.ty.src]
@@ -78,3 +85,4 @@ addopts = "-m 'not gpu'"
 
 [tool.uv.sources]
 vecraspy = { git = "https://github.com/kwundram2602/vecraspy.git" }
+geets = { git = "https://github.com/kwundram2602/geets.git" }

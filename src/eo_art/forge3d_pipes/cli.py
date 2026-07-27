@@ -1,4 +1,4 @@
-"""Thin argparse wrapper over ``pipeline.run``."""
+"""Thin argparse wrapper over ``pipeline.run`` and the acquire stage."""
 
 import argparse
 from collections.abc import Sequence
@@ -50,15 +50,75 @@ def _parser() -> argparse.ArgumentParser:
     run_cmd.add_argument(
         "--fail-fast", action="store_true", help="abort on the first failing variant"
     )
+    run_cmd.add_argument(
+        "--acquire",
+        default=None,
+        metavar="CONFIG",
+        help=(
+            "acquire config; run the acquire stage first and feed its DTM/"
+            "optical outputs into this render as input.path/overlay path "
+            "before rendering"
+        ),
+    )
+    run_cmd.add_argument(
+        "--acquire-overlay",
+        default=None,
+        metavar="NAME",
+        help="which overlay's path to set from the acquire stage "
+        "(default: the first overlay in the render config)",
+    )
+    run_cmd.add_argument(
+        "--acquire-no-cache",
+        action="store_true",
+        help="rerun the acquire stage instead of reusing a cached result",
+    )
+
+    acquire_cmd = sub.add_parser(
+        "acquire", help="fetch and prepare terrain/optical inputs for a render"
+    )
+    acquire_cmd.add_argument("config", help="acquire config file")
+    acquire_cmd.add_argument(
+        "--out", default="out", help="directory to write/cache acquire outputs under"
+    )
+    acquire_cmd.add_argument(
+        "--no-cache", action="store_true", help="rerun even if cached outputs exist"
+    )
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+def _run_acquire_stage(acquire_config: str, out_dir: str, use_cache: bool):
+    from typing import cast
 
+    from omegaconf import OmegaConf
+
+    from eo_art.forge3d_pipes.acquire import run_acquire
+    from eo_art.forge3d_pipes.acquire.schema import AcquireConfig
+
+    raw = OmegaConf.merge(
+        OmegaConf.structured(AcquireConfig), OmegaConf.load(acquire_config)
+    )
+    cfg = cast(AcquireConfig, OmegaConf.to_object(raw))
+    return run_acquire(cfg, out_dir, use_cache=use_cache)
+
+
+def _run_command(args: argparse.Namespace) -> int:
     overrides = list(args.overrides)
     if args.sweep:
         overrides.append(args.sweep)
+
+    if args.acquire:
+        result = _run_acquire_stage(
+            args.acquire, args.out or "out", use_cache=not args.acquire_no_cache
+        )
+        overrides.append(f"input.path={result.dtm_path}")
+        overlay_index = 0
+        if args.acquire_overlay:
+            from eo_art.forge3d_pipes.config.loader import load_raw
+
+            raw = load_raw(args.configs)
+            names = [overlay.name for overlay in raw.overlays]
+            overlay_index = names.index(args.acquire_overlay)
+        overrides.append(f"overlays.{overlay_index}.path={result.optical_path}")
 
     results = run(
         args.configs,
@@ -76,3 +136,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"ok     {result.name} -> {result.out_dir}")
     print(f"{len(succeeded)} succeeded, {len(failed)} failed")
     return 1 if failed else 0
+
+
+def _acquire_command(args: argparse.Namespace) -> int:
+    result = _run_acquire_stage(args.config, args.out, use_cache=not args.no_cache)
+    print(f"dtm     -> {result.dtm_path}")
+    print(f"optical -> {result.optical_path}")
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    if args.command == "acquire":
+        return _acquire_command(args)
+    return _run_command(args)

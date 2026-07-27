@@ -1,0 +1,30 @@
+# Fetches terrain + optical inputs for a render. Run standalone with
+# `eo-art-f3d acquire configs/acquire/example.yaml --out out`, or chained
+# ahead of a render with `eo-art-f3d run <render-config> --acquire
+# configs/acquire/example.yaml`.
+
+aoi_path: aoi.gpkg   # override with --set aoi_path=...
+ee_project: your-ee-project
+
+# Path to a local checkout of the sentinel_sr project (it ships its own
+# torch/cubo/mlstac stack in an isolated venv rather than eo-art's).
+sentinel_sr_dir: ../sentinel_sr
+
+sentinel:
+  start_date: "2023-01-01"
+  end_date: "2023-12-31"
+  model_path: /path/to/LDSRS2-SEN2SR
+  max_items: 10
+  max_cloud_cover: 20
+
+dem:
+  source: copernicus
+  scale: 30
+
+dtm:
+  apply_erosion: true
+  erosion_kwargs:
+    iterations: 30
+
+align:
+  resampling: bilinear
