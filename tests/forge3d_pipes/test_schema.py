@@ -135,3 +135,105 @@ def test_video_export_with_animation_is_accepted():
         )
     )
     assert cfg.export.video.enabled is True
+
+
+def test_render_overlay_preserve_colors_defaults_false():
+    cfg = OmegaConf.to_object(OmegaConf.merge(_base(), {"input": {"path": "dem.tif"}}))
+    assert cfg.render.overlay_preserve_colors is False
+    assert cfg.overlays == []
+
+
+def test_overlay_name_and_path_are_mandatory():
+    merged = OmegaConf.merge(
+        _base(), {"input": {"path": "dem.tif"}, "overlays": [{}]}
+    )
+    with pytest.raises(MissingMandatoryValue):
+        OmegaConf.to_object(merged)
+
+
+def test_overlay_with_name_and_path_is_accepted():
+    merged = OmegaConf.merge(
+        _base(),
+        {
+            "input": {"path": "dem.tif"},
+            "overlays": [{"name": "ndvi", "path": "ndvi.tif"}],
+        },
+    )
+    cfg = OmegaConf.to_object(merged)
+    assert cfg.overlays[0].name == "ndvi"
+    assert cfg.overlays[0].path == "ndvi.tif"
+    assert cfg.overlays[0].opacity is None
+    assert cfg.overlays[0].z_order is None
+    assert cfg.overlays[0].extent is None
+    assert cfg.overlays[0].prepare == []
+
+
+@pytest.mark.parametrize("opacity", [-0.1, 1.1])
+def test_overlay_opacity_out_of_range_rejected(opacity):
+    merged = OmegaConf.merge(
+        _base(),
+        {
+            "input": {"path": "dem.tif"},
+            "overlays": [{"name": "ndvi", "path": "ndvi.tif", "opacity": opacity}],
+        },
+    )
+    with pytest.raises(ValueError, match="overlay.opacity"):
+        OmegaConf.to_object(merged)
+
+
+@pytest.mark.parametrize("extent", [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0, 1.0]])
+def test_overlay_extent_wrong_length_rejected(extent):
+    merged = OmegaConf.merge(
+        _base(),
+        {
+            "input": {"path": "dem.tif"},
+            "overlays": [{"name": "ndvi", "path": "ndvi.tif", "extent": extent}],
+        },
+    )
+    with pytest.raises(ValueError, match="exactly 4 values"):
+        OmegaConf.to_object(merged)
+
+
+@pytest.mark.parametrize(
+    "extent", [[-0.1, 0.0, 1.0, 1.0], [0.0, 0.0, 1.1, 1.0], [0.0, 0.0, 1.0, 1.1]]
+)
+def test_overlay_extent_out_of_unit_range_rejected(extent):
+    merged = OmegaConf.merge(
+        _base(),
+        {
+            "input": {"path": "dem.tif"},
+            "overlays": [{"name": "ndvi", "path": "ndvi.tif", "extent": extent}],
+        },
+    )
+    with pytest.raises(ValueError, match="overlay.extent"):
+        OmegaConf.to_object(merged)
+
+
+@pytest.mark.parametrize(
+    "extent", [[0.5, 0.0, 0.5, 1.0], [0.0, 0.5, 1.0, 0.5]]
+)
+def test_overlay_extent_non_positive_area_rejected(extent):
+    merged = OmegaConf.merge(
+        _base(),
+        {
+            "input": {"path": "dem.tif"},
+            "overlays": [{"name": "ndvi", "path": "ndvi.tif", "extent": extent}],
+        },
+    )
+    with pytest.raises(ValueError, match="positive area"):
+        OmegaConf.to_object(merged)
+
+
+def test_multiple_overlays_each_validated_independently():
+    merged = OmegaConf.merge(
+        _base(),
+        {
+            "input": {"path": "dem.tif"},
+            "overlays": [
+                {"name": "good", "path": "good.tif"},
+                {"name": "bad", "path": "bad.tif", "opacity": 5.0},
+            ],
+        },
+    )
+    with pytest.raises(ValueError, match="overlay.opacity"):
+        OmegaConf.to_object(merged)

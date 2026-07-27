@@ -192,10 +192,42 @@ class Render:
     sun: Sun = field(default_factory=Sun)
     terrain: Terrain = field(default_factory=Terrain)
     pbr: Pbr = field(default_factory=Pbr)
+    overlay_preserve_colors: bool = False
 
     def __post_init__(self) -> None:
         _positive("render.width", self.width)
         _positive("render.height", self.height)
+
+
+@dataclass
+class OverlayCfg:
+    name: str = MISSING
+    path: str = MISSING
+    prepare: list[Any] = field(default_factory=list)
+    opacity: float | None = None
+    z_order: int | None = None
+    # Manual UV override (u0, v0, u1, v1); auto-computed from geo bounds when
+    # None. OmegaConf does not enforce tuple arity on this field (a 3-element
+    # list merges without error), so length is checked explicitly here.
+    extent: tuple[float, float, float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.opacity is not None:
+            _in_range("overlay.opacity", self.opacity, 0.0, 1.0)
+        if self.extent is not None:
+            if len(self.extent) != 4:
+                raise ValueError(
+                    f"overlay.extent must have exactly 4 values (u0, v0, u1, v1), "
+                    f"got {self.extent!r}"
+                )
+            u0, v0, u1, v1 = self.extent
+            for name, value in (("u0", u0), ("v0", v0), ("u1", u1), ("v1", v1)):
+                _in_range(f"overlay.extent.{name}", value, 0.0, 1.0)
+            if u0 >= u1 or v0 >= v1:
+                raise ValueError(
+                    f"overlay.extent must have positive area (u0<u1 and v0<v1), "
+                    f"got {self.extent!r}"
+                )
 
 
 @dataclass
@@ -283,6 +315,7 @@ class PipelineConfig:
     run: Run = field(default_factory=Run)
     input: Input = field(default_factory=Input)
     prepare: list[Any] = field(default_factory=list)
+    overlays: list[OverlayCfg] = field(default_factory=list)
     render: Render = field(default_factory=Render)
     animation: Animation = field(default_factory=Animation)
     export: Export = field(default_factory=Export)

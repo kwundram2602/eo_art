@@ -106,6 +106,70 @@ def test_viewer_is_closed_even_on_failure(fake_viewer, tmp_path, monkeypatch):
     assert fake_viewer.closed
 
 
+def test_overlays_sent_after_terrain_commands(fake_viewer, tmp_path):
+    overlay = runner.ResolvedOverlay(
+        name="ndvi", path=Path("ndvi.tif"), extent=(0.0, 0.0, 1.0, 1.0)
+    )
+    runner.render(_cfg(), Path("dem.tif"), tmp_path, overlays=[overlay])
+    assert [c["cmd"] for c in fake_viewer.commands] == [
+        "set_terrain",
+        "set_terrain_pbr",
+        "load_overlay",
+    ]
+
+
+def test_multiple_overlays_sent_in_list_order(fake_viewer, tmp_path):
+    overlays = [
+        runner.ResolvedOverlay(
+            name="a", path=Path("a.tif"), extent=(0.0, 0.0, 1.0, 1.0), z_order=1
+        ),
+        runner.ResolvedOverlay(
+            name="b", path=Path("b.tif"), extent=(0.0, 0.0, 1.0, 1.0), z_order=2
+        ),
+    ]
+    runner.render(_cfg(), Path("dem.tif"), tmp_path, overlays=overlays)
+    load_overlay_cmds = [c for c in fake_viewer.commands if c["cmd"] == "load_overlay"]
+    assert [c["name"] for c in load_overlay_cmds] == ["a", "b"]
+    assert [c["z_order"] for c in load_overlay_cmds] == [1, 2]
+
+
+def test_overlay_preserve_colors_sent_once_after_overlays_when_true(
+    fake_viewer, tmp_path
+):
+    cfg = _cfg()
+    cfg.render.overlay_preserve_colors = True
+    overlays = [
+        runner.ResolvedOverlay(
+            name="a", path=Path("a.tif"), extent=(0.0, 0.0, 1.0, 1.0)
+        ),
+        runner.ResolvedOverlay(
+            name="b", path=Path("b.tif"), extent=(0.0, 0.0, 1.0, 1.0)
+        ),
+    ]
+    runner.render(cfg, Path("dem.tif"), tmp_path, overlays=overlays)
+    cmds = [c["cmd"] for c in fake_viewer.commands]
+    assert cmds.count("set_overlay_preserve_colors") == 1
+    assert cmds[-1] == "set_overlay_preserve_colors"
+
+
+def test_overlay_preserve_colors_not_sent_when_false(fake_viewer, tmp_path):
+    overlay = runner.ResolvedOverlay(
+        name="a", path=Path("a.tif"), extent=(0.0, 0.0, 1.0, 1.0)
+    )
+    runner.render(_cfg(), Path("dem.tif"), tmp_path, overlays=[overlay])
+    assert "set_overlay_preserve_colors" not in [
+        c["cmd"] for c in fake_viewer.commands
+    ]
+
+
+def test_render_with_no_overlays_is_unchanged(fake_viewer, tmp_path):
+    runner.render(_cfg(), Path("dem.tif"), tmp_path)
+    assert [c["cmd"] for c in fake_viewer.commands] == [
+        "set_terrain",
+        "set_terrain_pbr",
+    ]
+
+
 @pytest.mark.gpu
 def test_real_render_produces_a_png(synthetic_dem, tmp_path):
     """Opt-in smoke test: runs the actual forge3d viewer."""
@@ -122,3 +186,53 @@ def test_real_render_produces_a_png(synthetic_dem, tmp_path):
     result = runner.render(cfg, projected, tmp_path / "out")
     assert result.snapshot is not None and result.snapshot.exists()
     assert result.snapshot.stat().st_size > 0
+
+
+@pytest.mark.gpu
+def test_real_render_with_overlay_drapes_onto_terrain(
+    synthetic_dem, synthetic_overlay, tmp_path
+):
+    """Opt-in smoke test: loads a real overlay through the real forge3d viewer.
+
+    This is the only practical way to settle whether forge3d's overlay V axis
+    is north-up (GIS convention, assumed by ``compute_normalized_extent``) or
+    south-up (image-space convention): render the same terrain with and
+    without the overlay and confirm the snapshot actually changes. If it
+    turns out ``compute_normalized_extent`` has v0/v1 backwards, the overlay
+    will land on the wrong side of the terrain and this test's premise (a
+    visibly different, non-degenerate snapshot) still holds, but a follow-up
+    visual inspection of the two PNGs would be needed to catch the flip.
+    """
+    import imageio.v3 as iio
+    import numpy as np
+
+    from eo_art.forge3d_pipes.prep import ops
+    from eo_art.forge3d_pipes.prep.extent import compute_normalized_extent
+
+    terrain = tmp_path / "utm.tif"
+    ops.reproject(synthetic_dem, terrain, ops.ReprojectCfg(crs="EPSG:32610"))
+    overlay = tmp_path / "overlay_utm.tif"
+    ops.reproject(synthetic_overlay, overlay, ops.ReprojectCfg(crs="EPSG:32610"))
+    extent = compute_normalized_extent(terrain, overlay)
+
+    cfg = _cfg()
+    cfg.render.width = 320
+    cfg.render.height = 240
+    cfg.render.camera.radius = 5000.0
+
+    baseline = runner.render(cfg, terrain, tmp_path / "baseline")
+    draped = runner.render(
+        cfg,
+        terrain,
+        tmp_path / "draped",
+        overlays=[
+            runner.ResolvedOverlay(
+                name="ndvi", path=overlay, extent=extent, opacity=1.0
+            )
+        ],
+    )
+
+    baseline_pixels = iio.imread(baseline.snapshot)
+    draped_pixels = iio.imread(draped.snapshot)
+    assert baseline_pixels.shape == draped_pixels.shape
+    assert not np.array_equal(baseline_pixels, draped_pixels)

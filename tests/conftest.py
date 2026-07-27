@@ -27,3 +27,47 @@ def synthetic_dem(tmp_path):
     ) as dst:
         dst.write(data, 1)
     return path
+
+
+@pytest.fixture
+def synthetic_overlay(tmp_path):
+    """Partially overlaps ``synthetic_dem``: shifted +0.016 deg east/south so
+    it extends past the DEM's east and south edges but overlaps its
+    northwest, exercising clamping in both U and V."""
+    width = height = 32
+    data = np.full((height, width), 0.5, dtype="float32")
+    path = tmp_path / "overlay.tif"
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=width,
+        height=height,
+        count=1,
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=from_origin(-121.784, 46.884, 0.001, 0.001),
+    ) as dst:
+        dst.write(data, 1)
+    return path
+
+
+@pytest.fixture
+def disjoint_overlay(tmp_path):
+    """Nowhere near ``synthetic_dem``'s bounds, for the no-overlap case."""
+    width = height = 8
+    data = np.full((height, width), 0.5, dtype="float32")
+    path = tmp_path / "disjoint.tif"
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=width,
+        height=height,
+        count=1,
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=from_origin(10.0, 10.0, 0.001, 0.001),
+    ) as dst:
+        dst.write(data, 1)
+    return path

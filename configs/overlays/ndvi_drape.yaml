@@ -1,0 +1,16 @@
+# Drapes an NDVI raster onto the DEM. Merge on top of base.yaml.
+# `extent` is omitted so it's computed automatically from the NDVI raster's
+# geographic bounds against the (already-reprojected) DEM's bounds; set it
+# explicitly only if auto-detection picks the wrong footprint.
+overlays:
+  - name: ndvi
+    path: ndvi.tif   # override with --set overlays.0.path=...
+    prepare:
+      - op: reproject
+        crs: EPSG:32610
+        resampling: bilinear
+    opacity: 0.75
+    z_order: 10
+
+render:
+  overlay_preserve_colors: true   # keep the NDVI palette instead of relit shading

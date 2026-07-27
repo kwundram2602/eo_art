@@ -84,3 +84,23 @@ def test_enum_via_dotlist_override(tmp_path):
         [cfg_file], overrides=["render.pbr.tonemap.operator=reinhard"]
     )
     assert cfg.render.pbr.tonemap.operator is TonemapOperator.reinhard
+
+
+def test_unknown_prep_op_in_overlay_fails_at_load(tmp_path):
+    cfg_file = tmp_path / "c.yaml"
+    cfg_file.write_text(
+        "input:\n  path: dem.tif\n"
+        "overlays:\n  - name: ndvi\n    path: ndvi.tif\n    prepare:\n"
+        "      - op: bogus\n"
+    )
+    with pytest.raises(ValueError, match=r"overlays\[0\]\.prepare"):
+        loader.load_config([cfg_file])
+
+
+def test_overlay_missing_path_fails_at_load(tmp_path):
+    from omegaconf.errors import MissingMandatoryValue
+
+    cfg_file = tmp_path / "c.yaml"
+    cfg_file.write_text("input:\n  path: dem.tif\noverlays:\n  - name: ndvi\n")
+    with pytest.raises(MissingMandatoryValue):
+        loader.load_config([cfg_file])

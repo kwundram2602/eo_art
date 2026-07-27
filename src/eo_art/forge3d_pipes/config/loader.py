@@ -40,6 +40,11 @@ def to_pipeline(cfg: DictConfig) -> PipelineConfig:
     # config rooted at PipelineConfig always yields a PipelineConfig instance.
     obj = cast(PipelineConfig, OmegaConf.to_object(cfg))
     validate_chain(obj.prepare)
+    for index, overlay in enumerate(obj.overlays):
+        try:
+            validate_chain(overlay.prepare)
+        except Exception as exc:
+            raise type(exc)(f"overlays[{index}].prepare: {exc}") from exc
     return obj
 
 

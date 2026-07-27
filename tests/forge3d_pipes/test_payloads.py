@@ -53,3 +53,40 @@ def test_payloads_are_plain_json_serialisable():
     cfg = _default_cfg()
     json.dumps(payloads.build_set_terrain(cfg))
     json.dumps(payloads.build_set_terrain_pbr(cfg))
+
+
+def test_build_load_overlay_full_fields():
+    cmd = payloads.build_load_overlay(
+        "ndvi", "ndvi.tif", (0.1, 0.2, 0.9, 0.8), opacity=0.75, z_order=10
+    )
+    assert cmd == {
+        "cmd": "load_overlay",
+        "name": "ndvi",
+        "path": "ndvi.tif",
+        "extent": [0.1, 0.2, 0.9, 0.8],
+        "opacity": 0.75,
+        "z_order": 10,
+    }
+
+
+def test_build_load_overlay_omits_none_opacity_and_z_order():
+    cmd = payloads.build_load_overlay("ndvi", "ndvi.tif", (0.0, 0.0, 1.0, 1.0))
+    assert "opacity" not in cmd
+    assert "z_order" not in cmd
+
+
+def test_build_load_overlay_extent_is_json_serialisable_list():
+    cmd = payloads.build_load_overlay("ndvi", "ndvi.tif", (0.0, 0.0, 1.0, 1.0))
+    assert isinstance(cmd["extent"], list)
+    json.dumps(cmd)
+
+
+def test_build_set_overlay_preserve_colors_true_and_false():
+    assert payloads.build_set_overlay_preserve_colors(True) == {
+        "cmd": "set_overlay_preserve_colors",
+        "preserve_colors": True,
+    }
+    assert payloads.build_set_overlay_preserve_colors(False) == {
+        "cmd": "set_overlay_preserve_colors",
+        "preserve_colors": False,
+    }

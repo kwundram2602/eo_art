@@ -24,8 +24,8 @@ def config_file(tmp_path, synthetic_dem):
 def fake_render(monkeypatch):
     calls = []
 
-    def _render(cfg, terrain_path, out_dir):
-        calls.append((cfg, terrain_path, out_dir))
+    def _render(cfg, terrain_path, out_dir, overlays=()):
+        calls.append((cfg, terrain_path, out_dir, overlays))
         snapshot = out_dir / cfg.render.snapshot_name
         snapshot.parent.mkdir(parents=True, exist_ok=True)
         snapshot.write_bytes(b"png")
@@ -54,7 +54,7 @@ def test_prep_runs_before_render_and_render_gets_prepared_path(
     config_file, fake_render, synthetic_dem
 ):
     pipeline.run([config_file])
-    _, terrain_path, _ = fake_render[0]
+    _, terrain_path, _, _ = fake_render[0]
     assert terrain_path != synthetic_dem
     assert "_prep" in str(terrain_path)
 
@@ -97,7 +97,7 @@ def test_prep_is_cached_across_sweep_variants(
 def test_failing_variant_is_recorded_and_others_continue(
     config_file, monkeypatch, tmp_path
 ):
-    def _render(cfg, terrain_path, out_dir):
+    def _render(cfg, terrain_path, out_dir, overlays=()):
         if cfg.render.pbr.exposure == 2.0:
             raise RuntimeError("gpu exploded")
         snapshot = out_dir / "snapshot.png"
@@ -115,7 +115,7 @@ def test_failing_variant_is_recorded_and_others_continue(
 
 
 def test_fail_fast_aborts_on_first_error(config_file, monkeypatch):
-    def _render(cfg, terrain_path, out_dir):
+    def _render(cfg, terrain_path, out_dir, overlays=()):
         raise RuntimeError("gpu exploded")
 
     monkeypatch.setattr(pipeline, "render", _render)
@@ -128,7 +128,7 @@ def test_fail_fast_aborts_on_first_error(config_file, monkeypatch):
 
 
 def test_missing_input_file_fails_before_rendering(tmp_path, monkeypatch):
-    def _render(cfg, terrain_path, out_dir):
+    def _render(cfg, terrain_path, out_dir, overlays=()):
         raise AssertionError("render must not be reached")
 
     monkeypatch.setattr(pipeline, "render", _render)
@@ -139,7 +139,7 @@ def test_missing_input_file_fails_before_rendering(tmp_path, monkeypatch):
 
 
 def test_bad_config_fails_before_any_variant_runs(tmp_path, synthetic_dem, monkeypatch):
-    def _render(cfg, terrain_path, out_dir):
+    def _render(cfg, terrain_path, out_dir, overlays=()):
         raise AssertionError("render must not be reached")
 
     monkeypatch.setattr(pipeline, "render", _render)
@@ -216,7 +216,7 @@ def test_video_export_is_wired_end_to_end(config_file, monkeypatch, tmp_path):
     import imageio.v3 as iio
     import numpy as np
 
-    def _render(cfg, terrain_path, out_dir):
+    def _render(cfg, terrain_path, out_dir, overlays=()):
         frames_dir = out_dir / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
         for index in range(3):
@@ -243,3 +243,104 @@ def test_video_export_is_wired_end_to_end(config_file, monkeypatch, tmp_path):
     assert results[0].video is not None
     assert results[0].video.name == "video.gif"
     assert results[0].video.exists() and results[0].video.stat().st_size > 0
+
+
+def test_overlay_is_prepped_and_resolved_and_passed_to_render(
+    tmp_path, synthetic_dem, synthetic_overlay, fake_render
+):
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "input": {"path": str(synthetic_dem)},
+                "run": {"name": "test", "out_dir": str(tmp_path / "out")},
+                "overlays": [
+                    {"name": "ndvi", "path": str(synthetic_overlay), "opacity": 0.5}
+                ],
+            }
+        )
+    )
+    pipeline.run([path])
+    _, _, _, overlays = fake_render[0]
+    assert len(overlays) == 1
+    resolved = overlays[0]
+    assert resolved.name == "ndvi"
+    assert resolved.path == synthetic_overlay  # no prepare chain -> unchanged path
+    assert resolved.opacity == 0.5
+    assert resolved.extent == pytest.approx((0.5, 0.0, 1.0, 0.5))
+
+
+def test_overlay_manual_extent_bypasses_auto_compute(
+    tmp_path, synthetic_dem, synthetic_overlay, fake_render, monkeypatch
+):
+    def _boom(terrain_path, overlay_path):
+        raise AssertionError("compute_normalized_extent must not be called")
+
+    monkeypatch.setattr(pipeline, "compute_normalized_extent", _boom)
+
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "input": {"path": str(synthetic_dem)},
+                "run": {"name": "test", "out_dir": str(tmp_path / "out")},
+                "overlays": [
+                    {
+                        "name": "ndvi",
+                        "path": str(synthetic_overlay),
+                        "extent": [0.1, 0.1, 0.9, 0.9],
+                    }
+                ],
+            }
+        )
+    )
+    pipeline.run([path])
+    _, _, _, overlays = fake_render[0]
+    assert overlays[0].extent == (0.1, 0.1, 0.9, 0.9)
+
+
+def test_multiple_overlays_all_resolved_in_order(
+    tmp_path, synthetic_dem, synthetic_overlay, fake_render
+):
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "input": {"path": str(synthetic_dem)},
+                "run": {"name": "test", "out_dir": str(tmp_path / "out")},
+                "overlays": [
+                    {"name": "a", "path": str(synthetic_overlay)},
+                    {"name": "b", "path": str(synthetic_dem)},
+                ],
+            }
+        )
+    )
+    pipeline.run([path])
+    _, _, _, overlays = fake_render[0]
+    assert [o.name for o in overlays] == ["a", "b"]
+
+
+def test_bad_overlay_prep_op_fails_before_any_variant_runs(
+    tmp_path, synthetic_dem, synthetic_overlay, monkeypatch
+):
+    def _render(cfg, terrain_path, out_dir, overlays=()):
+        raise AssertionError("render must not be reached")
+
+    monkeypatch.setattr(pipeline, "render", _render)
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "input": {"path": str(synthetic_dem)},
+                "overlays": [
+                    {
+                        "name": "ndvi",
+                        "path": str(synthetic_overlay),
+                        "prepare": [{"op": "nope"}],
+                    }
+                ],
+            }
+        )
+    )
+    with pytest.raises(ValueError, match=r"overlays\[0\]\.prepare"):
+        pipeline.run([path])

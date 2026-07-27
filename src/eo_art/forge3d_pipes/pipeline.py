@@ -10,8 +10,9 @@ from omegaconf import DictConfig, OmegaConf
 from eo_art.forge3d_pipes.config.loader import load_raw, to_pipeline
 from eo_art.forge3d_pipes.config.schema import PipelineConfig
 from eo_art.forge3d_pipes.export import encode_video, write_resolved_config
+from eo_art.forge3d_pipes.prep.extent import compute_normalized_extent
 from eo_art.forge3d_pipes.prep.registry import run_prep_chain
-from eo_art.forge3d_pipes.render.runner import RenderResult, render
+from eo_art.forge3d_pipes.render.runner import RenderResult, ResolvedOverlay, render
 from eo_art.forge3d_pipes.sweep import Variant, expand
 
 PREP_CACHE_DIRNAME = "_prep"
@@ -61,7 +62,28 @@ def _run_variant(
     prepared = run_prep_chain(
         Path(cfg.input.path), cfg.prepare, cache_dir, use_cache=use_cache
     )
-    return render(cfg, prepared, out_dir)
+
+    resolved_overlays = []
+    for overlay in cfg.overlays:
+        overlay_prepared = run_prep_chain(
+            Path(overlay.path), overlay.prepare, cache_dir, use_cache=use_cache
+        )
+        extent = (
+            tuple(overlay.extent)
+            if overlay.extent is not None
+            else compute_normalized_extent(prepared, overlay_prepared)
+        )
+        resolved_overlays.append(
+            ResolvedOverlay(
+                name=overlay.name,
+                path=overlay_prepared,
+                extent=extent,
+                opacity=overlay.opacity,
+                z_order=overlay.z_order,
+            )
+        )
+
+    return render(cfg, prepared, out_dir, overlays=resolved_overlays)
 
 
 def run(

@@ -85,6 +85,17 @@ prepare:                 # ordered; omit entirely to render the DEM as-is
   - op: scale_to_gsd
     target_gsd: 30.0
 
+overlays:                # optional; each drapes a raster onto the terrain
+  - name: ndvi
+    path: ndvi.tif
+    prepare:             # same op registry as the top-level prepare: chain
+      - op: reproject
+        crs: EPSG:32610
+    opacity: 0.75         # 0..1, optional
+    z_order: 10           # optional; higher draws on top
+    extent: null          # optional manual UV override; auto-computed from
+                          # geo bounds against the DEM when omitted
+
 render:
   width: 1200
   height: 720
@@ -92,6 +103,8 @@ render:
   camera: {phi: 300.0, theta: 10.5, radius: 26000.0, fov: 60.0}
   sun: {azimuth: 305.0, elevation: 24.0, intensity: 1.0, ambient: 0.05}
   terrain: {zscale: 3.0}
+  overlay_preserve_colors: false  # global; true keeps overlay source colors
+                                  # unrelit (e.g. categorical land-cover)
   pbr:
     exposure: 1.35
     shadow_technique: pcss     # pcss | pcf | none
@@ -129,6 +142,31 @@ for result in results:
     print(result.name, result.ok, result.snapshot)
 ```
 
+### Raster overlays
+
+Drape a raster (land-cover, NDVI, an orthophoto) onto the terrain:
+
+```bash
+uv run eo-art-f3d run configs/base.yaml configs/overlays/ndvi_drape.yaml
+```
+
+Each entry under `overlays:` gets its own `prepare:` chain (typically a
+`reproject` to the DEM's CRS) and is placed on the terrain by a normalized UV
+box computed automatically from the DEM's and overlay's geographic bounds —
+you don't need to work out UV coordinates by hand. Set `extent: [u0, v0, u1,
+v1]` explicitly only if auto-detection picks the wrong footprint. An overlay
+that only partially covers the DEM is clamped to the DEM's bounds rather than
+rejected.
+
+`render.overlay_preserve_colors` is a single flag for the whole render, not
+per overlay (forge3d's viewer only exposes it that way) — set it `true` to
+keep a categorical palette (e.g. land-cover classes) unrelit instead of
+shaded by the scene's lighting.
+
+Like `prepare:`, overlays are config-file only — there's no dedicated CLI
+flag — but the generic `--set` dotlist still reaches into them for one-off
+tweaks: `--set overlays.0.opacity=0.5`.
+
 ### Adding a prep op
 
 Prep ops are pluggable. An op writes `src` to `dst` and returns the path it wrote:
@@ -155,6 +193,6 @@ only backend.
 ### Tests
 
 ```bash
-uv run pytest              # 122 tests, no GPU needed
+uv run pytest              # 158 tests, no GPU needed
 uv run pytest -m gpu       # opt-in: opens a real viewer and renders
 ```

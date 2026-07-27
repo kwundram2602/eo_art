@@ -22,9 +22,15 @@ def _look_configs() -> list[Path]:
     return sorted((CONFIG_ROOT / "looks").rglob("*.yaml"))
 
 
+def _overlay_configs() -> list[Path]:
+    """Overlay files are override fragments, not standalone configs."""
+    return sorted((CONFIG_ROOT / "overlays").rglob("*.yaml"))
+
+
 def test_configs_directory_is_found():
     assert BASE.is_file(), f"expected a base config at {BASE}"
     assert _look_configs(), "no shipped look configs found"
+    assert _overlay_configs(), "no shipped overlay configs found"
 
 
 def test_base_config_loads_standalone():
@@ -46,6 +52,21 @@ def test_look_alone_is_not_a_standalone_config(look):
 
     with pytest.raises(MissingMandatoryValue):
         load_config([look])
+
+
+@pytest.mark.parametrize("overlay", _overlay_configs(), ids=lambda p: p.name)
+def test_each_overlay_config_composes_onto_base(overlay):
+    """Overlay files carry no `input.path`, only valid merged onto a base."""
+    cfg = load_config([BASE, overlay])
+    assert cfg.overlays, f"{overlay} should define at least one overlay"
+
+
+@pytest.mark.parametrize("overlay", _overlay_configs(), ids=lambda p: p.name)
+def test_overlay_config_alone_is_not_a_standalone_config(overlay):
+    from omegaconf.errors import MissingMandatoryValue
+
+    with pytest.raises(MissingMandatoryValue):
+        load_config([overlay])
 
 
 def test_base_and_look_compose():
