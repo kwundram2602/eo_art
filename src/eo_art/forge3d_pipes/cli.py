@@ -104,27 +104,62 @@ def _run_acquire_stage(acquire_config: str, out_dir: str | None, use_cache: bool
     return run_acquire(cfg, out_dir or cfg.out_dir, use_cache=use_cache)
 
 
+def _apply_acquire_result(configs, acquire_overlay, result):
+    """Merge an AcquireResult's paths into the render config and return the
+    path to a temp file holding the merged result.
+
+    OmegaConf's dotlist overrides always build DictConfig nodes for numeric
+    path segments (``overlays.0.path=...`` parses as ``{"overlays": {"0":
+    {"path": ...}}}``), which then fails to merge against ``overlays``' real
+    ListConfig -- so the overlay path has to be set by direct item
+    assignment on the loaded config instead of via a dotlist string.
+    """
+    import tempfile
+
+    from omegaconf import OmegaConf
+
+    from eo_art.forge3d_pipes.config.loader import load_raw
+
+    raw = load_raw(configs)
+    raw.input.path = str(result.dtm_path)
+
+    if not raw.overlays:
+        raise SystemExit(
+            "--acquire needs at least one entry under `overlays:` in the "
+            "render config to attach the acquired optical raster to"
+        )
+    overlay_index = 0
+    if acquire_overlay:
+        names = [overlay.name for overlay in raw.overlays]
+        if acquire_overlay not in names:
+            raise SystemExit(
+                f"--acquire-overlay {acquire_overlay!r} not found in "
+                f"`overlays:` (have: {names})"
+            )
+        overlay_index = names.index(acquire_overlay)
+    raw.overlays[overlay_index].path = str(result.optical_path)
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, prefix="eo-art-acquired-"
+    )
+    OmegaConf.save(raw, tmp.name)
+    return tmp.name
+
+
 def _run_command(args: argparse.Namespace) -> int:
     overrides = list(args.overrides)
     if args.sweep:
         overrides.append(args.sweep)
 
+    configs = list(args.configs)
     if args.acquire:
         result = _run_acquire_stage(
             args.acquire, args.out, use_cache=not args.acquire_no_cache
         )
-        overrides.append(f"input.path={result.dtm_path}")
-        overlay_index = 0
-        if args.acquire_overlay:
-            from eo_art.forge3d_pipes.config.loader import load_raw
-
-            raw = load_raw(args.configs)
-            names = [overlay.name for overlay in raw.overlays]
-            overlay_index = names.index(args.acquire_overlay)
-        overrides.append(f"overlays.{overlay_index}.path={result.optical_path}")
+        configs = [_apply_acquire_result(configs, args.acquire_overlay, result)]
 
     results = run(
-        args.configs,
+        configs,
         overrides=overrides,
         out=args.out,
         use_cache=False if args.no_cache else None,

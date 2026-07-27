@@ -163,28 +163,63 @@ def test_acquire_command_no_cache_flag(fake_acquire_stage, tmp_path):
     assert fake_acquire_stage["use_cache"] is False
 
 
-def test_run_with_acquire_injects_input_and_overlay_overrides(
-    captured_run, fake_acquire_stage, cfg_path, tmp_path
+@pytest.fixture
+def render_cfg_with_overlay(tmp_path):
+    path = tmp_path / "render.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "input": {"path": "dem.tif"},
+                "overlays": [{"name": "optical", "path": "placeholder.tif"}],
+            }
+        )
+    )
+    return path
+
+
+def test_run_with_acquire_injects_input_and_overlay_paths(
+    captured_run, fake_acquire_stage, render_cfg_with_overlay
+):
+    acquire_cfg = render_cfg_with_overlay.parent / "acquire.yaml"
+    acquire_cfg.write_text("aoi_path: aoi.gpkg\n")
+
+    cli.main(["run", str(render_cfg_with_overlay), "--acquire", str(acquire_cfg)])
+
+    # the overlay path override can't be a dotlist string (OmegaConf's
+    # dotlist parser builds dict nodes for numeric segments like
+    # "overlays.0", which then fails to merge against the real ListConfig),
+    # so `run` is called with a single, pre-merged temp config instead.
+    assert len(captured_run["configs"]) == 1
+    merged = yaml.safe_load(Path(captured_run["configs"][0]).read_text())
+    assert merged["input"]["path"] == str(fake_acquire_stage["dtm_path"])
+    assert merged["overlays"][0]["path"] == str(fake_acquire_stage["optical_path"])
+    assert merged["overlays"][0]["name"] == "optical"
+
+
+def test_run_with_acquire_no_overlay_in_config_is_a_clean_error(
+    fake_acquire_stage, cfg_path, tmp_path
 ):
     acquire_cfg = tmp_path / "acquire.yaml"
     acquire_cfg.write_text("aoi_path: aoi.gpkg\n")
 
-    cli.main(["run", str(cfg_path), "--acquire", str(acquire_cfg)])
-
-    assert captured_run["overrides"] == [
-        f"input.path={fake_acquire_stage['dtm_path']}",
-        f"overlays.0.path={fake_acquire_stage['optical_path']}",
-    ]
+    with pytest.raises(SystemExit, match="overlays"):
+        cli.main(["run", str(cfg_path), "--acquire", str(acquire_cfg)])
 
 
 def test_run_with_acquire_no_cache_flag(
-    captured_run, fake_acquire_stage, cfg_path, tmp_path
+    captured_run, fake_acquire_stage, render_cfg_with_overlay
 ):
-    acquire_cfg = tmp_path / "acquire.yaml"
+    acquire_cfg = render_cfg_with_overlay.parent / "acquire.yaml"
     acquire_cfg.write_text("aoi_path: aoi.gpkg\n")
 
     cli.main(
-        ["run", str(cfg_path), "--acquire", str(acquire_cfg), "--acquire-no-cache"]
+        [
+            "run",
+            str(render_cfg_with_overlay),
+            "--acquire",
+            str(acquire_cfg),
+            "--acquire-no-cache",
+        ]
     )
 
     assert fake_acquire_stage["use_cache"] is False
@@ -219,10 +254,37 @@ def test_run_with_acquire_overlay_selects_named_overlay(
         ]
     )
 
-    assert captured_run["overrides"] == [
-        f"input.path={fake_acquire_stage['dtm_path']}",
-        f"overlays.1.path={fake_acquire_stage['optical_path']}",
-    ]
+    merged = yaml.safe_load(Path(captured_run["configs"][0]).read_text())
+    assert merged["overlays"][0]["path"] == "a.tif"  # untouched
+    assert merged["overlays"][1]["path"] == str(fake_acquire_stage["optical_path"])
+
+
+def test_run_with_acquire_unknown_overlay_name_is_a_clean_error(
+    fake_acquire_stage, tmp_path
+):
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "input": {"path": "dem.tif"},
+                "overlays": [{"name": "a", "path": "a.tif"}],
+            }
+        )
+    )
+    acquire_cfg = tmp_path / "acquire.yaml"
+    acquire_cfg.write_text("aoi_path: aoi.gpkg\n")
+
+    with pytest.raises(SystemExit, match="nope"):
+        cli.main(
+            [
+                "run",
+                str(cfg_path),
+                "--acquire",
+                str(acquire_cfg),
+                "--acquire-overlay",
+                "nope",
+            ]
+        )
 
 
 def test_run_acquire_stage_falls_back_to_configs_own_out_dir(monkeypatch, tmp_path):
