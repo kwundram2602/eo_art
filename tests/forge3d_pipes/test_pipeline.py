@@ -265,7 +265,12 @@ def test_overlay_is_prepped_and_resolved_and_passed_to_render(
     assert len(overlays) == 1
     resolved = overlays[0]
     assert resolved.name == "ndvi"
-    assert resolved.path == synthetic_overlay  # no prepare chain -> unchanged path
+    # forge3d's live-viewer load_overlay reads the file via Rust's `image`
+    # crate, which does not support TIFF -- so the raw (or prepped) GeoTIFF
+    # must be re-exported as a PNG regardless of whether the overlay has its
+    # own prepare chain.
+    assert resolved.path.suffix == ".png"
+    assert resolved.path.exists()
     assert resolved.opacity == 0.5
     assert resolved.extent == pytest.approx((0.5, 0.0, 1.0, 0.5))
 
@@ -344,3 +349,37 @@ def test_bad_overlay_prep_op_fails_before_any_variant_runs(
     )
     with pytest.raises(ValueError, match=r"overlays\[0\]\.prepare"):
         pipeline.run([path])
+
+
+def test_overlay_png_export_is_cached_across_sweep_variants(
+    tmp_path, synthetic_dem, synthetic_overlay, fake_render, monkeypatch
+):
+    calls = []
+    original = pipeline.export_overlay_png_cached
+
+    def _counting(src, cache_dir, use_cache=True):
+        calls.append(src)
+        return original(src, cache_dir, use_cache)
+
+    monkeypatch.setattr(pipeline, "export_overlay_png_cached", _counting)
+
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "input": {"path": str(synthetic_dem)},
+                "run": {"name": "test", "out_dir": str(tmp_path / "out")},
+                "overlays": [{"name": "ndvi", "path": str(synthetic_overlay)}],
+            }
+        )
+    )
+
+    pipeline.run(
+        [path], overrides=["sweep.params={render.pbr.exposure: [1.0, 2.0, 3.0]}"]
+    )
+
+    # Called once per variant, but the underlying PNG conversion is cached,
+    # so only one output file exists.
+    assert len(calls) == 3
+    cache = tmp_path / "out" / "test" / "_prep"
+    assert len(list(cache.glob("*.png"))) == 1

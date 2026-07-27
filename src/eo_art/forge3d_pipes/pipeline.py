@@ -11,6 +11,7 @@ from eo_art.forge3d_pipes.config.loader import load_raw, to_pipeline
 from eo_art.forge3d_pipes.config.schema import PipelineConfig
 from eo_art.forge3d_pipes.export import encode_video, write_resolved_config
 from eo_art.forge3d_pipes.prep.extent import compute_normalized_extent
+from eo_art.forge3d_pipes.prep.overlay_image import export_overlay_png_cached
 from eo_art.forge3d_pipes.prep.registry import run_prep_chain
 from eo_art.forge3d_pipes.render.runner import RenderResult, ResolvedOverlay, render
 from eo_art.forge3d_pipes.sweep import Variant, expand
@@ -73,10 +74,16 @@ def _run_variant(
             if overlay.extent is not None
             else compute_normalized_extent(prepared, overlay_prepared)
         )
+        # forge3d's live-viewer load_overlay reads the file through Rust's
+        # `image` crate, which does not support TIFF; every prep op writes
+        # GeoTIFF, so the final prepped raster must be re-exported as a PNG.
+        overlay_png = export_overlay_png_cached(
+            overlay_prepared, cache_dir, use_cache=use_cache
+        )
         resolved_overlays.append(
             ResolvedOverlay(
                 name=overlay.name,
-                path=overlay_prepared,
+                path=overlay_png,
                 extent=extent,
                 opacity=overlay.opacity,
                 z_order=overlay.z_order,

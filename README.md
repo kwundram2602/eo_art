@@ -163,6 +163,14 @@ per overlay (forge3d's viewer only exposes it that way) — set it `true` to
 keep a categorical palette (e.g. land-cover classes) unrelit instead of
 shaded by the scene's lighting.
 
+forge3d's live-viewer overlay loader reads the file through Rust's `image`
+crate, which does not support GeoTIFF (every prep op writes GeoTIFF) — so
+each overlay's final prepped raster is automatically re-exported as a PNG
+(first three bands, clipped to 0-255) right before the viewer loads it. This
+is transparent and cached like any other prep step; source values should
+already be in a displayable ~0-255 range by the end of the overlay's own
+`prepare:` chain — raw reflectance (e.g. 0-1) will render as near-black.
+
 Like `prepare:`, overlays are config-file only — there's no dedicated CLI
 flag — but the generic `--set` dotlist still reaches into them for one-off
 tweaks: `--set overlays.0.opacity=0.5`.
