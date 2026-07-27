@@ -10,6 +10,7 @@ dependencies = [
     "opensr-model>=1.1.1",
     "sen2sr>=0.6.1",
     "stac2cube[tools,geo,io,coreg,ml,notebook]",
+    "timm>=1.0.28",
     "torch>=2.13.0",
     "torchvision>=0.28.0",
     "vecraspy",
