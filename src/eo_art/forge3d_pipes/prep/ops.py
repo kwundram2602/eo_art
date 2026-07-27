@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import rasterio
 from omegaconf import MISSING
 from rasterio.enums import Resampling
@@ -96,5 +97,66 @@ def saturate(src: Path, dst: Path, cfg: SaturateCfg) -> Path:
         destination.write(g2, 2)
         destination.write(b2, 3)
         for index, band in enumerate(extra, start=4):
+            destination.write(band, index)
+    return Path(dst)
+
+
+@dataclass
+class RgbStretchCfg:
+    # 1-indexed source band numbers to pull as R, G, B. Default matches a
+    # 10-band Sentinel-2 stack ordered B02,B03,B04,...: band 3 (B04, red),
+    # band 2 (B03, green), band 1 (B02, blue).
+    bands: tuple[int, int, int] = (3, 2, 1)
+    lower_percentile: float = 2.0
+    upper_percentile: float = 98.0
+
+
+@register_op("rgb_stretch", RgbStretchCfg)
+def rgb_stretch(src: Path, dst: Path, cfg: RgbStretchCfg) -> Path:
+    """Select three bands and percentile-stretch each independently to uint8.
+
+    ``export_overlay_png`` reads an overlay's first three bands verbatim as
+    R, G, B and clips to [0, 255] -- so a multiband reflectance-scaled raster
+    (e.g. Sentinel-2 in B02,B03,B04,... order, values roughly 0-1) needs
+    reducing to a true-color composite first, or it renders as solid black
+    with swapped channels.
+    """
+    if len(cfg.bands) != 3:
+        raise ValueError(f"rgb_stretch.bands must have exactly 3 entries, got {cfg.bands!r}")
+    if not (0 <= cfg.lower_percentile < cfg.upper_percentile <= 100):
+        raise ValueError(
+            "rgb_stretch percentiles must satisfy 0 <= lower_percentile < "
+            f"upper_percentile <= 100, got lower={cfg.lower_percentile}, "
+            f"upper={cfg.upper_percentile}"
+        )
+
+    with rasterio.open(src) as source:
+        if source.count < max(cfg.bands):
+            raise ValueError(
+                f"{src} has {source.count} band(s); rgb_stretch.bands={cfg.bands!r} "
+                f"needs at least band {max(cfg.bands)}"
+            )
+        nodata = source.nodata
+        meta = source.meta.copy()
+
+        stretched = []
+        for band_index in cfg.bands:
+            band = source.read(band_index).astype("float64")
+            valid = band[band != nodata] if nodata is not None else band.ravel()
+            valid = valid[np.isfinite(valid)]
+            if valid.size == 0:
+                stretched.append(np.zeros(band.shape, dtype="uint8"))
+                continue
+            lo, hi = np.percentile(
+                valid, [cfg.lower_percentile, cfg.upper_percentile]
+            )
+            if hi <= lo:
+                hi = lo + 1e-9
+            scaled = np.clip((band - lo) / (hi - lo), 0.0, 1.0) * 255.0
+            stretched.append(scaled.astype("uint8"))
+
+    meta.update(count=3, dtype="uint8", nodata=None)
+    with rasterio.open(dst, "w", **meta) as destination:
+        for index, band in enumerate(stretched, start=1):
             destination.write(band, index)
     return Path(dst)

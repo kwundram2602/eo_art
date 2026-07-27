@@ -11,6 +11,7 @@ def test_ops_are_registered():
     assert registry.get_op("reproject").schema is ops.ReprojectCfg
     assert registry.get_op("scale_to_gsd").schema is ops.ScaleToGsdCfg
     assert registry.get_op("saturate").schema is ops.SaturateCfg
+    assert registry.get_op("rgb_stretch").schema is ops.RgbStretchCfg
 
 
 def test_reproject_changes_crs(synthetic_dem, tmp_path):
@@ -185,3 +186,131 @@ def test_saturate_requires_at_least_three_bands(tmp_path):
 
     with pytest.raises(ValueError, match="at least 3 bands"):
         ops.saturate(src, tmp_path / "out.tif", ops.SaturateCfg(factor=0.5))
+
+
+def _write_multiband(path, bands, *, nodata=None, dtype="float32"):
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=bands[0].shape[1],
+        height=bands[0].shape[0],
+        count=len(bands),
+        dtype=dtype,
+        crs="EPSG:4326",
+        nodata=nodata,
+        transform=from_origin(0.0, 1.0, 0.01, 0.01),
+    ) as dst:
+        for index, band in enumerate(bands, start=1):
+            dst.write(band.astype(dtype), index)
+
+
+def test_rgb_stretch_selects_and_reorders_bands(tmp_path):
+    # distinguishable spatial patterns per band, so picking "the wrong band"
+    # or forgetting to reorder shows up as a different array, not just a
+    # different scale.
+    band1 = np.array([[0.0, 0.0], [300.0, 300.0]], dtype="float32")  # top/bottom
+    band2 = np.array([[0.0, 300.0], [0.0, 300.0]], dtype="float32")  # left/right
+    band3 = np.array([[300.0, 0.0], [0.0, 300.0]], dtype="float32")  # anti-diagonal
+    src = tmp_path / "src.tif"
+    _write_multiband(src, [band1, band2, band3])
+
+    dst = tmp_path / "out.tif"
+    ops.rgb_stretch(
+        src,
+        dst,
+        ops.RgbStretchCfg(bands=(3, 1, 2), lower_percentile=0.0, upper_percentile=100.0),
+    )
+
+    with rasterio.open(dst) as out:
+        assert out.count == 3
+        assert out.dtypes[0] == "uint8"
+        r, g, b = out.read(1), out.read(2), out.read(3)
+    assert r.tolist() == [[255, 0], [0, 255]]  # from band3
+    assert g.tolist() == [[0, 0], [255, 255]]  # from band1
+    assert b.tolist() == [[0, 255], [0, 255]]  # from band2
+
+
+def test_rgb_stretch_default_bands_match_sentinel2_b02_b03_b04_order(tmp_path):
+    blue = np.full((2, 2), 10.0, dtype="float32")  # band 1 (B02)
+    green = np.full((2, 2), 20.0, dtype="float32")  # band 2 (B03)
+    red = np.array([[0.0, 100.0], [0.0, 100.0]], dtype="float32")  # band 3 (B04)
+    src = tmp_path / "src.tif"
+    _write_multiband(src, [blue, green, red])
+
+    dst = tmp_path / "out.tif"
+    ops.rgb_stretch(src, dst, ops.RgbStretchCfg(lower_percentile=0.0, upper_percentile=100.0))
+
+    with rasterio.open(dst) as out:
+        r = out.read(1)
+    assert r.tolist() == [[0, 255], [0, 255]]  # default bands=(3, 2, 1) -> R from band 3
+
+
+def test_rgb_stretch_clips_outliers_beyond_percentile_range(tmp_path):
+    # a 0..99 gradient (99 pixels) plus one extreme outlier: with only ~1% of
+    # pixels affected, the 2nd/98th percentiles stay governed by the
+    # gradient, not the outlier -- so the outlier clips to 255 instead of
+    # dragging the whole stretch's dynamic range down with it.
+    band = np.arange(100, dtype="float32").reshape(10, 10)
+    band[0, 0] = 10_000.0  # was 0; now the extreme outlier
+    src = tmp_path / "src.tif"
+    _write_multiband(src, [band, band, band])
+
+    dst = tmp_path / "out.tif"
+    ops.rgb_stretch(src, dst, ops.RgbStretchCfg())
+
+    with rasterio.open(dst) as out:
+        r = out.read(1)
+    assert r[0, 0] == 255  # clipped, not blown out past the uint8 range
+    assert r[9, 9] >= 200  # value 99, the brightest non-outlier pixel: near-white
+    assert r[0, 1] <= 20  # value 1, the dimmest non-outlier pixel: near-black
+    mid_value_pixel = tuple(np.argwhere(band == 50)[0])
+    assert 80 <= r[mid_value_pixel] <= 180  # a genuine mid-range stretch, not binary
+
+
+def test_rgb_stretch_excludes_nodata_from_percentile_computation(tmp_path):
+    band = np.array(
+        [[0.0, 25.0], [75.0, 100.0]], dtype="float32"
+    )  # min/max of the *valid* data
+    nodata_band = band.copy()
+    nodata_band[0, 0] = -9999.0  # nodata sentinel, must not skew the stretch
+    src = tmp_path / "src.tif"
+    _write_multiband(src, [nodata_band, nodata_band, nodata_band], nodata=-9999.0)
+
+    dst = tmp_path / "out.tif"
+    ops.rgb_stretch(src, dst, ops.RgbStretchCfg(lower_percentile=0.0, upper_percentile=100.0))
+
+    with rasterio.open(dst) as out:
+        r = out.read(1)
+    # stretched against the valid range [25, 100], not [-9999, 100]
+    assert r[0, 1] == 0
+    assert r[1, 1] == 255
+
+
+def test_rgb_stretch_requires_exactly_three_bands_selected(tmp_path):
+    band = np.zeros((2, 2), dtype="float32")
+    src = tmp_path / "src.tif"
+    _write_multiband(src, [band, band, band])
+
+    with pytest.raises(ValueError, match="exactly 3 entries"):
+        ops.rgb_stretch(src, tmp_path / "out.tif", ops.RgbStretchCfg(bands=(1, 2)))
+
+
+def test_rgb_stretch_rejects_invalid_percentile_order(tmp_path):
+    band = np.zeros((2, 2), dtype="float32")
+    src = tmp_path / "src.tif"
+    _write_multiband(src, [band, band, band])
+
+    with pytest.raises(ValueError, match="lower_percentile"):
+        ops.rgb_stretch(
+            src, tmp_path / "out.tif", ops.RgbStretchCfg(lower_percentile=90, upper_percentile=10)
+        )
+
+
+def test_rgb_stretch_rejects_out_of_range_band_index(tmp_path):
+    band = np.zeros((2, 2), dtype="float32")
+    src = tmp_path / "src.tif"
+    _write_multiband(src, [band, band])  # only 2 bands
+
+    with pytest.raises(ValueError, match="2 band"):
+        ops.rgb_stretch(src, tmp_path / "out.tif", ops.RgbStretchCfg())  # default needs band 3
