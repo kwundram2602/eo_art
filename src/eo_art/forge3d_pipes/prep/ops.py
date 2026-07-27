@@ -88,9 +88,16 @@ def saturate(src: Path, dst: Path, cfg: SaturateCfg) -> Path:
         meta = source.meta.copy()
 
     gray = 0.299 * r + 0.587 * g + 0.114 * b
-    r2 = (gray + (r - gray) * cfg.factor).astype(meta["dtype"])
-    g2 = (gray + (g - gray) * cfg.factor).astype(meta["dtype"])
-    b2 = (gray + (b - gray) * cfg.factor).astype(meta["dtype"])
+    dtype = np.dtype(meta["dtype"])
+    channels = [gray + (channel - gray) * cfg.factor for channel in (r, g, b)]
+    if np.issubdtype(dtype, np.integer):
+        # A factor > 1 (or < 0) routinely pushes values outside the dtype's
+        # range; astype() on an integer dtype wraps silently instead of
+        # clamping (e.g. -24.5 -> 232), which is how a correctly dark pixel
+        # turns bright and wrong-colored instead of just clipping to black.
+        info = np.iinfo(dtype)
+        channels = [np.clip(channel, info.min, info.max) for channel in channels]
+    r2, g2, b2 = (channel.astype(dtype) for channel in channels)
 
     with rasterio.open(dst, "w", **meta) as destination:
         destination.write(r2, 1)
@@ -101,6 +108,15 @@ def saturate(src: Path, dst: Path, cfg: SaturateCfg) -> Path:
     return Path(dst)
 
 
+def _percentile_bounds(valid: np.ndarray, lower: float, upper: float) -> tuple[float, float]:
+    if valid.size == 0:
+        return 0.0, 1.0
+    lo, hi = np.percentile(valid, [lower, upper])
+    if hi <= lo:
+        hi = lo + 1e-9
+    return float(lo), float(hi)
+
+
 @dataclass
 class RgbStretchCfg:
     # 1-indexed source band numbers to pull as R, G, B. Default matches a
@@ -109,11 +125,19 @@ class RgbStretchCfg:
     bands: tuple[int, int, int] = (3, 2, 1)
     lower_percentile: float = 2.0
     upper_percentile: float = 98.0
+    # A single (lo, hi) is computed from all three bands' pooled pixels and
+    # applied identically to each -- stretching each band to its own min/max
+    # independently auto-levels every channel separately, which destroys the
+    # relative brightness between channels (e.g. water, dark and flat across
+    # all bands, ends up rendering pink instead of dark blue). Set False only
+    # for deliberately false-color composites where bands aren't meant to
+    # share a natural color balance.
+    shared_stretch: bool = True
 
 
 @register_op("rgb_stretch", RgbStretchCfg)
 def rgb_stretch(src: Path, dst: Path, cfg: RgbStretchCfg) -> Path:
-    """Select three bands and percentile-stretch each independently to uint8.
+    """Select three bands and percentile-stretch them to a true-color uint8 composite.
 
     ``export_overlay_png`` reads an overlay's first three bands verbatim as
     R, G, B and clips to [0, 255] -- so a multiband reflectance-scaled raster
@@ -139,21 +163,25 @@ def rgb_stretch(src: Path, dst: Path, cfg: RgbStretchCfg) -> Path:
         nodata = source.nodata
         meta = source.meta.copy()
 
-        stretched = []
-        for band_index in cfg.bands:
-            band = source.read(band_index).astype("float64")
-            valid = band[band != nodata] if nodata is not None else band.ravel()
-            valid = valid[np.isfinite(valid)]
-            if valid.size == 0:
-                stretched.append(np.zeros(band.shape, dtype="uint8"))
-                continue
-            lo, hi = np.percentile(
-                valid, [cfg.lower_percentile, cfg.upper_percentile]
-            )
-            if hi <= lo:
-                hi = lo + 1e-9
-            scaled = np.clip((band - lo) / (hi - lo), 0.0, 1.0) * 255.0
-            stretched.append(scaled.astype("uint8"))
+        raw_bands = [source.read(band_index).astype("float64") for band_index in cfg.bands]
+
+    def _valid(band):
+        valid = band[band != nodata] if nodata is not None else band.ravel()
+        return valid[np.isfinite(valid)]
+
+    if cfg.shared_stretch:
+        pooled = np.concatenate([_valid(band) for band in raw_bands])
+        bounds = [_percentile_bounds(pooled, cfg.lower_percentile, cfg.upper_percentile)] * 3
+    else:
+        bounds = [
+            _percentile_bounds(_valid(band), cfg.lower_percentile, cfg.upper_percentile)
+            for band in raw_bands
+        ]
+
+    stretched = []
+    for band, (lo, hi) in zip(raw_bands, bounds):
+        scaled = np.clip((band - lo) / (hi - lo), 0.0, 1.0) * 255.0
+        stretched.append(scaled.astype("uint8"))
 
     meta.update(count=3, dtype="uint8", nodata=None)
     with rasterio.open(dst, "w", **meta) as destination:

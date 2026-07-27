@@ -12,6 +12,7 @@ def test_ops_are_registered():
     assert registry.get_op("scale_to_gsd").schema is ops.ScaleToGsdCfg
     assert registry.get_op("saturate").schema is ops.SaturateCfg
     assert registry.get_op("rgb_stretch").schema is ops.RgbStretchCfg
+    assert ops.RgbStretchCfg().shared_stretch is True
 
 
 def test_reproject_changes_crs(synthetic_dem, tmp_path):
@@ -188,6 +189,41 @@ def test_saturate_requires_at_least_three_bands(tmp_path):
         ops.saturate(src, tmp_path / "out.tif", ops.SaturateCfg(factor=0.5))
 
 
+def test_saturate_clips_instead_of_wrapping_on_an_integer_dtype(tmp_path):
+    """A near-black pixel pushed further from gray by factor>1 must clip to
+    0, not wrap around to a bright value -- exactly the bug that turned
+    Doubtless Bay's water pink: saturate() ran on rgb_stretch's uint8
+    output, (gray + (channel - gray) * factor) went negative, and
+    astype("uint8") wrapped -24.5 into 232 instead of clamping to 0."""
+    r = np.full((2, 2), 5, dtype="uint8")  # dark, near-black pixel
+    g = np.full((2, 2), 6, dtype="uint8")
+    b = np.full((2, 2), 250, dtype="uint8")  # near-white, to also test the high end
+    src = tmp_path / "src.tif"
+    with rasterio.open(
+        src,
+        "w",
+        driver="GTiff",
+        width=2,
+        height=2,
+        count=3,
+        dtype="uint8",
+        crs="EPSG:4326",
+        transform=from_origin(0.0, 1.0, 0.01, 0.01),
+    ) as dst:
+        dst.write(r, 1)
+        dst.write(g, 2)
+        dst.write(b, 3)
+
+    dst_path = tmp_path / "out.tif"
+    ops.saturate(src, dst_path, ops.SaturateCfg(factor=3.0))
+
+    with rasterio.open(dst_path) as out:
+        out_r, out_g, out_b = out.read(1), out.read(2), out.read(3)
+    assert (out_r == 0).all()  # clipped to black, not wrapped to a bright value
+    assert (out_g == 0).all()
+    assert (out_b == 255).all()  # clipped to white on the high end too
+
+
 def _write_multiband(path, bands, *, nodata=None, dtype="float32"):
     with rasterio.open(
         path,
@@ -266,6 +302,55 @@ def test_rgb_stretch_clips_outliers_beyond_percentile_range(tmp_path):
     assert r[0, 1] <= 20  # value 1, the dimmest non-outlier pixel: near-black
     mid_value_pixel = tuple(np.argwhere(band == 50)[0])
     assert 80 <= r[mid_value_pixel] <= 180  # a genuine mid-range stretch, not binary
+
+
+def test_rgb_stretch_shared_stretch_preserves_relative_band_brightness(tmp_path):
+    """Same spatial pattern, different physical magnitude per band (as real
+    Sentinel-2 bands do): a shared stretch must keep the brighter band
+    brighter, not auto-level each band to the same [0, 255] range -- doing
+    the latter is exactly what turned Doubtless Bay's water pink instead of
+    dark blue (every channel independently maxed out, erasing the real
+    magnitude difference between bands)."""
+    ramp = np.arange(16, dtype="float32").reshape(4, 4)
+    dim = ramp * 0.5  # half the magnitude of `ramp`, same relative shape
+    bright = ramp * 2.0  # double the magnitude
+
+    src = tmp_path / "src.tif"
+    _write_multiband(src, [ramp, dim, bright])  # bands 1, 2, 3
+
+    dst = tmp_path / "shared.tif"
+    ops.rgb_stretch(
+        src,
+        dst,
+        ops.RgbStretchCfg(
+            bands=(1, 2, 3), lower_percentile=0.0, upper_percentile=100.0
+        ),
+    )
+    with rasterio.open(dst) as out:
+        r, g, b = out.read(1)[3, 3], out.read(2)[3, 3], out.read(3)[3, 3]
+    # `bright` truly has twice the values of `ramp`, and `dim` half -- the
+    # shared stretch must preserve that ordering instead of flattening it.
+    assert b > r > g
+    assert b == 255  # the overall pool's max
+    assert 15 < r < 140  # ramp's own max (15) is half the pool's max (30)
+    assert g < 70  # dim's own max (7.5) is a quarter of the pool's max
+
+    independent_dst = tmp_path / "independent.tif"
+    ops.rgb_stretch(
+        src,
+        independent_dst,
+        ops.RgbStretchCfg(
+            bands=(1, 2, 3),
+            lower_percentile=0.0,
+            upper_percentile=100.0,
+            shared_stretch=False,
+        ),
+    )
+    with rasterio.open(independent_dst) as out:
+        r2, g2, b2 = out.read(1)[3, 3], out.read(2)[3, 3], out.read(3)[3, 3]
+    # independent per-band stretch auto-levels each band to its own max,
+    # erasing the real magnitude difference between them.
+    assert (r2, g2, b2) == (255, 255, 255)
 
 
 def test_rgb_stretch_excludes_nodata_from_percentile_computation(tmp_path):
