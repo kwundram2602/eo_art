@@ -1,6 +1,8 @@
+import numpy as np
 import pytest
 import rasterio
 from omegaconf.errors import MissingMandatoryValue
+from rasterio.transform import from_origin
 
 from eo_art.forge3d_pipes.prep import ops, registry
 
@@ -8,6 +10,7 @@ from eo_art.forge3d_pipes.prep import ops, registry
 def test_ops_are_registered():
     assert registry.get_op("reproject").schema is ops.ReprojectCfg
     assert registry.get_op("scale_to_gsd").schema is ops.ScaleToGsdCfg
+    assert registry.get_op("saturate").schema is ops.SaturateCfg
 
 
 def test_reproject_changes_crs(synthetic_dem, tmp_path):
@@ -94,3 +97,91 @@ def test_reproject_rejects_a_raster_without_a_crs(tmp_path):
 
     with pytest.raises(ValueError, match="has no CRS"):
         ops.reproject(src, tmp_path / "out.tif", ops.ReprojectCfg(crs="EPSG:32610"))
+
+
+def _write_rgb(path, r, g, b):
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=r.shape[1],
+        height=r.shape[0],
+        count=3,
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=from_origin(0.0, 1.0, 0.01, 0.01),
+    ) as dst:
+        dst.write(r, 1)
+        dst.write(g, 2)
+        dst.write(b, 3)
+
+
+def test_saturate_factor_zero_produces_grayscale(tmp_path):
+    r = np.full((4, 4), 200.0, dtype="float32")
+    g = np.full((4, 4), 100.0, dtype="float32")
+    b = np.full((4, 4), 50.0, dtype="float32")
+    src = tmp_path / "src.tif"
+    _write_rgb(src, r, g, b)
+
+    dst = tmp_path / "out.tif"
+    ops.saturate(src, dst, ops.SaturateCfg(factor=0.0))
+
+    with rasterio.open(dst) as out:
+        out_r, out_g, out_b = out.read(1), out.read(2), out.read(3)
+    gray = 0.299 * r + 0.587 * g + 0.114 * b
+    assert out_r == pytest.approx(gray, abs=1e-3)
+    assert out_g == pytest.approx(gray, abs=1e-3)
+    assert out_b == pytest.approx(gray, abs=1e-3)
+
+
+def test_saturate_factor_one_is_unchanged(tmp_path):
+    r = np.full((4, 4), 200.0, dtype="float32")
+    g = np.full((4, 4), 100.0, dtype="float32")
+    b = np.full((4, 4), 50.0, dtype="float32")
+    src = tmp_path / "src.tif"
+    _write_rgb(src, r, g, b)
+
+    dst = tmp_path / "out.tif"
+    ops.saturate(src, dst, ops.SaturateCfg(factor=1.0))
+
+    with rasterio.open(dst) as out:
+        assert out.read(1) == pytest.approx(r, abs=1e-3)
+        assert out.read(2) == pytest.approx(g, abs=1e-3)
+        assert out.read(3) == pytest.approx(b, abs=1e-3)
+
+
+def test_saturate_factor_above_one_increases_deviation_from_gray(tmp_path):
+    r = np.full((4, 4), 200.0, dtype="float32")
+    g = np.full((4, 4), 100.0, dtype="float32")
+    b = np.full((4, 4), 50.0, dtype="float32")
+    src = tmp_path / "src.tif"
+    _write_rgb(src, r, g, b)
+
+    dst = tmp_path / "out.tif"
+    ops.saturate(src, dst, ops.SaturateCfg(factor=2.0))
+
+    gray = 0.299 * r + 0.587 * g + 0.114 * b
+    with rasterio.open(dst) as out:
+        out_r = out.read(1)
+    original_deviation = np.abs(r - gray)
+    new_deviation = np.abs(out_r - gray)
+    assert new_deviation == pytest.approx(original_deviation * 2.0, abs=1e-3)
+
+
+def test_saturate_requires_at_least_three_bands(tmp_path):
+    src = tmp_path / "src.tif"
+    with rasterio.open(
+        src,
+        "w",
+        driver="GTiff",
+        width=4,
+        height=4,
+        count=1,
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=from_origin(0.0, 1.0, 0.01, 0.01),
+    ) as dst:
+        dst.write(np.zeros((4, 4), dtype="float32"), 1)
+
+    with pytest.raises(ValueError, match="at least 3 bands"):
+        ops.saturate(src, tmp_path / "out.tif", ops.SaturateCfg(factor=0.5))

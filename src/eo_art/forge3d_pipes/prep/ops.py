@@ -65,3 +65,36 @@ def scale_to_gsd(src: Path, dst: Path, cfg: ScaleToGsdCfg) -> Path:
 
     scale_raster_to_gsd(src, dst, cfg.target_gsd, resampling=cfg.resampling.value)
     return Path(dst)
+
+
+@dataclass
+class SaturateCfg:
+    factor: float = 1.0  # 0 = grayscale, 1 = unchanged, >1 = more vivid
+
+
+@register_op("saturate", SaturateCfg)
+def saturate(src: Path, dst: Path, cfg: SaturateCfg) -> Path:
+    """Blend each RGB pixel toward (factor<1) or away from (factor>1) its
+    luminance (ITU-R BT.601 weights). Bands beyond the first three, if any,
+    pass through unchanged."""
+    with rasterio.open(src) as source:
+        if source.count < 3:
+            raise ValueError(
+                f"saturate requires at least 3 bands (RGB), got {source.count}"
+            )
+        r, g, b = source.read(1), source.read(2), source.read(3)
+        extra = [source.read(i) for i in range(4, source.count + 1)]
+        meta = source.meta.copy()
+
+    gray = 0.299 * r + 0.587 * g + 0.114 * b
+    r2 = (gray + (r - gray) * cfg.factor).astype(meta["dtype"])
+    g2 = (gray + (g - gray) * cfg.factor).astype(meta["dtype"])
+    b2 = (gray + (b - gray) * cfg.factor).astype(meta["dtype"])
+
+    with rasterio.open(dst, "w", **meta) as destination:
+        destination.write(r2, 1)
+        destination.write(g2, 2)
+        destination.write(b2, 3)
+        for index, band in enumerate(extra, start=4):
+            destination.write(band, index)
+    return Path(dst)

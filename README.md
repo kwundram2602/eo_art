@@ -91,6 +91,8 @@ overlays:                # optional; each drapes a raster onto the terrain
     prepare:             # same op registry as the top-level prepare: chain
       - op: reproject
         crs: EPSG:32610
+      - op: saturate      # 0 = grayscale, 1 = unchanged, >1 = more vivid
+        factor: 1.3
     opacity: 0.75         # 0..1, optional
     z_order: 10           # optional; higher draws on top
     extent: null          # optional manual UV override; auto-computed from
