@@ -7,10 +7,12 @@ testable without a GPU.
 """
 
 from dataclasses import dataclass
-
-from forge3d.animation import CameraAnimation
+from typing import TYPE_CHECKING
 
 from eo_art.forge3d_pipes.config.schema import AnimationKind, Orbit, PipelineConfig
+
+if TYPE_CHECKING:
+    from forge3d.animation import CameraAnimation
 
 
 @dataclass(frozen=True)
@@ -50,10 +52,19 @@ def orbit_keyframes(orbit: Orbit, fps: int) -> list[Keyframe]:
     ]
 
 
-def build_camera_animation(cfg: PipelineConfig) -> CameraAnimation | None:
-    """Return a forge3d animation, or ``None`` when animation is disabled."""
+def build_camera_animation(cfg: PipelineConfig) -> "CameraAnimation | None":
+    """Return a forge3d animation, or ``None`` when animation is disabled.
+
+    Import kept lazy: a module-level import would make forge3d load at
+    package-import time (``forge3d_pipes/__init__.py`` -> ``pipeline`` ->
+    ``runner`` -> ``animation``), before ``gpu.select_gpu`` gets a chance to
+    set the Vulkan ICD environment variables that steer which adapter
+    forge3d binds to.
+    """
     if cfg.animation.kind is AnimationKind.none:
         return None
+
+    from forge3d.animation import CameraAnimation
 
     animation = CameraAnimation()
     for frame in orbit_keyframes(cfg.animation.orbit, cfg.animation.fps):
