@@ -9,7 +9,7 @@ input:
 prepare:
   - op: reproject
     crs: EPSG:32610
-    resampling: nearest
+    resampling: cubic
 
 render:
   width: 1200

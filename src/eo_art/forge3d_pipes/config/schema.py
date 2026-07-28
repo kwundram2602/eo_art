@@ -36,6 +36,9 @@ class ResamplingName(Enum):
     nearest = "nearest"
     bilinear = "bilinear"
     cubic = "cubic"
+    cubic_spline = "cubic_spline"
+    lanczos = "lanczos"
+    average = "average"
 
 
 class SweepMode(Enum):

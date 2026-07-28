@@ -30,6 +30,32 @@ def synthetic_dem(tmp_path):
 
 
 @pytest.fixture
+def synthetic_dem_int16(tmp_path):
+    """An int16 DEM (SRTM/NASADEM's native dtype) with a smooth elevation
+    gradient, so cubic/bilinear resampling has genuine fractional values to
+    either preserve (as float32) or truncate away (left as int16)."""
+    width = height = 32
+    rows, cols = np.mgrid[0:height, 0:width]
+    data = (1000 + rows * 3 + cols * 2).astype("int16")
+
+    path = tmp_path / "dem_int16.tif"
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=width,
+        height=height,
+        count=1,
+        dtype="int16",
+        crs="EPSG:4326",
+        nodata=-32768,
+        transform=from_origin(-121.8, 46.9, 0.001, 0.001),
+    ) as dst:
+        dst.write(data, 1)
+    return path
+
+
+@pytest.fixture
 def synthetic_overlay(tmp_path):
     """Partially overlaps ``synthetic_dem``: shifted +0.016 deg east/south so
     it extends past the DEM's east and south edges but overlaps its

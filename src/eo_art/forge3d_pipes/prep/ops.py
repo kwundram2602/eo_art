@@ -1,6 +1,7 @@
 """Prep ops. Each takes (src, dst, cfg) and returns the written path."""
 
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 import numpy as np
@@ -17,13 +18,47 @@ _RESAMPLING = {
     ResamplingName.nearest: Resampling.nearest,
     ResamplingName.bilinear: Resampling.bilinear,
     ResamplingName.cubic: Resampling.cubic,
+    ResamplingName.cubic_spline: Resampling.cubic_spline,
+    ResamplingName.lanczos: Resampling.lanczos,
+    ResamplingName.average: Resampling.average,
 }
+
+
+# Lowercase member names for the same OmegaConf-matches-by-name reason as
+# ResamplingName (config/schema.py).
+class DtypeMode(Enum):
+    auto = "auto"
+    preserve = "preserve"
+    float32 = "float32"
+
+
+def _resolve_dst_dtype(
+    source_dtype: str, resampling: ResamplingName, mode: DtypeMode
+) -> str:
+    if mode is DtypeMode.preserve:
+        return source_dtype
+    if mode is DtypeMode.float32:
+        return "float32"
+    # auto: nearest only ever copies an existing sample value, so there is no
+    # fractional result to lose by leaving the dtype alone. Any other method
+    # interpolates, and an integer destination truncates that interpolation
+    # straight back into the terracing this promotion exists to prevent.
+    if resampling is not ResamplingName.nearest and np.issubdtype(
+        np.dtype(source_dtype), np.integer
+    ):
+        return "float32"
+    return source_dtype
 
 
 @dataclass
 class ReprojectCfg:
     crs: str = MISSING
     resampling: ResamplingName = ResamplingName.bilinear
+    # This op is generic (also used on overlay rasters, e.g.
+    # configs/overlays/ndvi_drape.yaml), so `auto` promoting a uint8 overlay
+    # under `bilinear` is a deliberate, accepted side effect -- not DEM-only
+    # behaviour. See DtypeMode for the policy semantics.
+    dtype: DtypeMode = DtypeMode.auto
 
 
 @dataclass
@@ -42,8 +77,15 @@ def reproject(src: Path, dst: Path, cfg: ReprojectCfg) -> Path:
             source.crs, cfg.crs, source.width, source.height, *source.bounds
         )
         meta = source.meta.copy()
+        dst_dtype = _resolve_dst_dtype(meta["dtype"], cfg.resampling, cfg.dtype)
         meta.update(
-            {"crs": cfg.crs, "transform": transform, "width": width, "height": height}
+            {
+                "crs": cfg.crs,
+                "transform": transform,
+                "width": width,
+                "height": height,
+                "dtype": dst_dtype,
+            }
         )
         with rasterio.open(dst, "w", **meta) as destination:
             for band in range(1, source.count + 1):
@@ -108,7 +150,9 @@ def saturate(src: Path, dst: Path, cfg: SaturateCfg) -> Path:
     return Path(dst)
 
 
-def _percentile_bounds(valid: np.ndarray, lower: float, upper: float) -> tuple[float, float]:
+def _percentile_bounds(
+    valid: np.ndarray, lower: float, upper: float
+) -> tuple[float, float]:
     if valid.size == 0:
         return 0.0, 1.0
     lo, hi = np.percentile(valid, [lower, upper])
@@ -146,7 +190,9 @@ def rgb_stretch(src: Path, dst: Path, cfg: RgbStretchCfg) -> Path:
     with swapped channels.
     """
     if len(cfg.bands) != 3:
-        raise ValueError(f"rgb_stretch.bands must have exactly 3 entries, got {cfg.bands!r}")
+        raise ValueError(
+            f"rgb_stretch.bands must have exactly 3 entries, got {cfg.bands!r}"
+        )
     if not (0 <= cfg.lower_percentile < cfg.upper_percentile <= 100):
         raise ValueError(
             "rgb_stretch percentiles must satisfy 0 <= lower_percentile < "
@@ -163,7 +209,9 @@ def rgb_stretch(src: Path, dst: Path, cfg: RgbStretchCfg) -> Path:
         nodata = source.nodata
         meta = source.meta.copy()
 
-        raw_bands = [source.read(band_index).astype("float64") for band_index in cfg.bands]
+        raw_bands = [
+            source.read(band_index).astype("float64") for band_index in cfg.bands
+        ]
 
     def _valid(band):
         valid = band[band != nodata] if nodata is not None else band.ravel()
@@ -171,7 +219,9 @@ def rgb_stretch(src: Path, dst: Path, cfg: RgbStretchCfg) -> Path:
 
     if cfg.shared_stretch:
         pooled = np.concatenate([_valid(band) for band in raw_bands])
-        bounds = [_percentile_bounds(pooled, cfg.lower_percentile, cfg.upper_percentile)] * 3
+        bounds = [
+            _percentile_bounds(pooled, cfg.lower_percentile, cfg.upper_percentile)
+        ] * 3
     else:
         bounds = [
             _percentile_bounds(_valid(band), cfg.lower_percentile, cfg.upper_percentile)

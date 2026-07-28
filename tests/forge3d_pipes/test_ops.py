@@ -2,9 +2,11 @@ import numpy as np
 import pytest
 import rasterio
 from omegaconf.errors import MissingMandatoryValue
+from rasterio.enums import Resampling
 from rasterio.transform import from_origin
 
 from eo_art.forge3d_pipes.prep import ops, registry
+from eo_art.forge3d_pipes.prep.overlay_image import export_overlay_png
 
 
 def test_ops_are_registered():
@@ -99,6 +101,190 @@ def test_reproject_rejects_a_raster_without_a_crs(tmp_path):
 
     with pytest.raises(ValueError, match="has no CRS"):
         ops.reproject(src, tmp_path / "out.tif", ops.ReprojectCfg(crs="EPSG:32610"))
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("lanczos", Resampling.lanczos),
+        ("cubic_spline", Resampling.cubic_spline),
+        ("average", Resampling.average),
+    ],
+)
+def test_new_resampling_names_map_to_rasterio_and_survive_reprojection(
+    name, expected, synthetic_dem, tmp_path
+):
+    resampling = ops.ResamplingName[name]
+    assert ops._RESAMPLING[resampling] is expected
+
+    dst = tmp_path / "out.tif"
+    result = ops.reproject(
+        synthetic_dem, dst, ops.ReprojectCfg(crs="EPSG:32610", resampling=resampling)
+    )
+    with rasterio.open(result) as src:
+        assert src.crs.to_string() == "EPSG:32610"
+        assert src.count == 1
+
+
+def test_a_config_using_each_new_resampling_name_loads(tmp_path):
+    for name in ("lanczos", "cubic_spline", "average"):
+        _, cfg = registry.validate_entry(
+            {"op": "reproject", "crs": "EPSG:32610", "resampling": name}
+        )
+        assert cfg.resampling is ops.ResamplingName[name]
+
+
+def test_auto_promotes_int16_dem_to_float32_under_interpolating_resampling(
+    synthetic_dem_int16, tmp_path
+):
+    """The core regression: cubic-resampling an int16 DEM under `auto` must
+    both promote to float32 and actually recover fractional elevation
+    values -- writing the interpolated result back to int16 truncates it
+    right back into the terracing this policy exists to prevent."""
+    dst = tmp_path / "out.tif"
+    ops.reproject(
+        synthetic_dem_int16,
+        dst,
+        ops.ReprojectCfg(crs="EPSG:32610", resampling=ops.ResamplingName.cubic),
+    )
+    with rasterio.open(dst) as out:
+        assert out.dtypes[0] == "float32"
+        auto_distinct = len(np.unique(out.read(1)))
+
+    preserved = tmp_path / "preserved.tif"
+    ops.reproject(
+        synthetic_dem_int16,
+        preserved,
+        ops.ReprojectCfg(
+            crs="EPSG:32610",
+            resampling=ops.ResamplingName.cubic,
+            dtype=ops.DtypeMode.preserve,
+        ),
+    )
+    with rasterio.open(preserved) as out:
+        assert out.dtypes[0] == "int16"
+        preserved_distinct = len(np.unique(out.read(1)))
+
+    assert auto_distinct > preserved_distinct * 2
+
+
+def test_auto_does_not_promote_nearest_resampling(synthetic_dem_int16, tmp_path):
+    dst = tmp_path / "out.tif"
+    ops.reproject(
+        synthetic_dem_int16,
+        dst,
+        ops.ReprojectCfg(crs="EPSG:32610", resampling=ops.ResamplingName.nearest),
+    )
+    with rasterio.open(dst) as out:
+        assert out.dtypes[0] == "int16"
+
+
+def test_auto_leaves_float_sources_unchanged(synthetic_dem, tmp_path):
+    dst = tmp_path / "out.tif"
+    ops.reproject(
+        synthetic_dem,
+        dst,
+        ops.ReprojectCfg(crs="EPSG:32610", resampling=ops.ResamplingName.cubic),
+    )
+    with rasterio.open(dst) as out:
+        assert out.dtypes[0] == "float32"
+
+
+def test_preserve_keeps_source_dtype_even_when_interpolating(
+    synthetic_dem_int16, tmp_path
+):
+    dst = tmp_path / "out.tif"
+    ops.reproject(
+        synthetic_dem_int16,
+        dst,
+        ops.ReprojectCfg(
+            crs="EPSG:32610",
+            resampling=ops.ResamplingName.cubic,
+            dtype=ops.DtypeMode.preserve,
+        ),
+    )
+    with rasterio.open(dst) as out:
+        assert out.dtypes[0] == "int16"
+
+
+def test_float32_policy_always_promotes_even_under_nearest(
+    synthetic_dem_int16, tmp_path
+):
+    dst = tmp_path / "out.tif"
+    ops.reproject(
+        synthetic_dem_int16,
+        dst,
+        ops.ReprojectCfg(
+            crs="EPSG:32610",
+            resampling=ops.ResamplingName.nearest,
+            dtype=ops.DtypeMode.float32,
+        ),
+    )
+    with rasterio.open(dst) as out:
+        assert out.dtypes[0] == "float32"
+
+
+def test_nodata_survives_promotion(synthetic_dem_int16, tmp_path):
+    dst = tmp_path / "out.tif"
+    ops.reproject(
+        synthetic_dem_int16,
+        dst,
+        ops.ReprojectCfg(crs="EPSG:32610", resampling=ops.ResamplingName.cubic),
+    )
+    with rasterio.open(dst) as out:
+        assert out.dtypes[0] == "float32"
+        assert out.nodata == pytest.approx(-32768.0)
+
+
+def test_auto_promoted_uint8_overlay_still_round_trips_through_export(tmp_path):
+    """The documented overlay side effect of `auto`: reprojecting a uint8
+    overlay with an interpolating resampler promotes it to float32.
+    export_overlay_png must still read that float32, 0-255-ranged output
+    correctly rather than assuming an integer source."""
+    r = np.array([[10, 200], [50, 250]], dtype="uint8")
+    g = np.array([[20, 190], [60, 240]], dtype="uint8")
+    b = np.array([[30, 180], [70, 230]], dtype="uint8")
+    src = tmp_path / "overlay.tif"
+    with rasterio.open(
+        src,
+        "w",
+        driver="GTiff",
+        width=2,
+        height=2,
+        count=3,
+        dtype="uint8",
+        crs="EPSG:4326",
+        transform=from_origin(0.0, 1.0, 0.01, 0.01),
+    ) as dst:
+        dst.write(r, 1)
+        dst.write(g, 2)
+        dst.write(b, 3)
+
+    reprojected = tmp_path / "reprojected.tif"
+    ops.reproject(
+        src,
+        reprojected,
+        ops.ReprojectCfg(crs="EPSG:32610", resampling=ops.ResamplingName.bilinear),
+    )
+    with rasterio.open(reprojected) as out:
+        assert out.dtypes[0] == "float32"
+
+    png = tmp_path / "overlay.png"
+    export_overlay_png(reprojected, png)
+    import imageio.v3 as iio
+
+    pixels = iio.imread(png)
+    assert pixels.dtype == np.uint8
+    assert pixels.shape[2] == 3
+    # Bilinear interpolation is a convex combination of the source samples,
+    # so the reprojected-and-exported PNG must stay within the original
+    # per-channel value range -- proving real color data survived the
+    # uint8 -> float32 -> uint8 round trip rather than collapsing to 0/NaN
+    # or blowing out past the dtype's range.
+    assert 10 <= int(pixels[..., 0].min()) and int(pixels[..., 0].max()) <= 250
+    assert 20 <= int(pixels[..., 1].min()) and int(pixels[..., 1].max()) <= 240
+    assert 30 <= int(pixels[..., 2].min()) and int(pixels[..., 2].max()) <= 230
+    assert int(pixels[..., 0].max()) > int(pixels[..., 0].min())
 
 
 def _write_rgb(path, r, g, b):
@@ -255,7 +441,9 @@ def test_rgb_stretch_selects_and_reorders_bands(tmp_path):
     ops.rgb_stretch(
         src,
         dst,
-        ops.RgbStretchCfg(bands=(3, 1, 2), lower_percentile=0.0, upper_percentile=100.0),
+        ops.RgbStretchCfg(
+            bands=(3, 1, 2), lower_percentile=0.0, upper_percentile=100.0
+        ),
     )
 
     with rasterio.open(dst) as out:
@@ -275,11 +463,16 @@ def test_rgb_stretch_default_bands_match_sentinel2_b02_b03_b04_order(tmp_path):
     _write_multiband(src, [blue, green, red])
 
     dst = tmp_path / "out.tif"
-    ops.rgb_stretch(src, dst, ops.RgbStretchCfg(lower_percentile=0.0, upper_percentile=100.0))
+    ops.rgb_stretch(
+        src, dst, ops.RgbStretchCfg(lower_percentile=0.0, upper_percentile=100.0)
+    )
 
     with rasterio.open(dst) as out:
         r = out.read(1)
-    assert r.tolist() == [[0, 255], [0, 255]]  # default bands=(3, 2, 1) -> R from band 3
+    assert r.tolist() == [
+        [0, 255],
+        [0, 255],
+    ]  # default bands=(3, 2, 1) -> R from band 3
 
 
 def test_rgb_stretch_clips_outliers_beyond_percentile_range(tmp_path):
@@ -363,7 +556,9 @@ def test_rgb_stretch_excludes_nodata_from_percentile_computation(tmp_path):
     _write_multiband(src, [nodata_band, nodata_band, nodata_band], nodata=-9999.0)
 
     dst = tmp_path / "out.tif"
-    ops.rgb_stretch(src, dst, ops.RgbStretchCfg(lower_percentile=0.0, upper_percentile=100.0))
+    ops.rgb_stretch(
+        src, dst, ops.RgbStretchCfg(lower_percentile=0.0, upper_percentile=100.0)
+    )
 
     with rasterio.open(dst) as out:
         r = out.read(1)
@@ -388,7 +583,9 @@ def test_rgb_stretch_rejects_invalid_percentile_order(tmp_path):
 
     with pytest.raises(ValueError, match="lower_percentile"):
         ops.rgb_stretch(
-            src, tmp_path / "out.tif", ops.RgbStretchCfg(lower_percentile=90, upper_percentile=10)
+            src,
+            tmp_path / "out.tif",
+            ops.RgbStretchCfg(lower_percentile=90, upper_percentile=10),
         )
 
 
@@ -398,4 +595,6 @@ def test_rgb_stretch_rejects_out_of_range_band_index(tmp_path):
     _write_multiband(src, [band, band])  # only 2 bands
 
     with pytest.raises(ValueError, match="2 band"):
-        ops.rgb_stretch(src, tmp_path / "out.tif", ops.RgbStretchCfg())  # default needs band 3
+        ops.rgb_stretch(
+            src, tmp_path / "out.tif", ops.RgbStretchCfg()
+        )  # default needs band 3
