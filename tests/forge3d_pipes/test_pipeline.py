@@ -2,7 +2,16 @@ import pytest
 import yaml
 
 from eo_art.forge3d_pipes import pipeline
+from eo_art.forge3d_pipes.config.schema import GpuPreference
 from eo_art.forge3d_pipes.render.runner import RenderResult
+
+
+@pytest.fixture(autouse=True)
+def stub_gpu(monkeypatch):
+    """``gpu.py`` has its own focused tests; pipeline tests must not touch a
+    real GPU/Vulkan instance just because ``run`` now calls ``select_gpu``
+    as its first action."""
+    monkeypatch.setattr(pipeline, "select_gpu", lambda preference: "stub-adapter")
 
 
 @pytest.fixture
@@ -349,6 +358,40 @@ def test_bad_overlay_prep_op_fails_before_any_variant_runs(
     )
     with pytest.raises(ValueError, match=r"overlays\[0\]\.prepare"):
         pipeline.run([path])
+
+
+def test_run_calls_select_gpu_with_the_configured_preference(
+    config_file, fake_render, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        pipeline, "select_gpu", lambda preference: calls.append(preference)
+    )
+    pipeline.run([config_file], overrides=["run.gpu=discrete"])
+    assert calls == [GpuPreference.discrete]
+
+
+def test_run_defaults_to_auto_gpu_preference(config_file, fake_render, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        pipeline, "select_gpu", lambda preference: calls.append(preference)
+    )
+    pipeline.run([config_file])
+    assert calls == [GpuPreference.auto]
+
+
+def test_select_gpu_runs_before_prep_or_render(config_file, fake_render, monkeypatch):
+    order = []
+    monkeypatch.setattr(pipeline, "select_gpu", lambda preference: order.append("gpu"))
+    original_prep = pipeline.run_prep_chain
+
+    def _spy_prep(src, entries, cache_dir, use_cache=True):
+        order.append("prep")
+        return original_prep(src, entries, cache_dir, use_cache)
+
+    monkeypatch.setattr(pipeline, "run_prep_chain", _spy_prep)
+    pipeline.run([config_file])
+    assert order == ["gpu", "prep"]
 
 
 def test_overlay_png_export_is_cached_across_sweep_variants(

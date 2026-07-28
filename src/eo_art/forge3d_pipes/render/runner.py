@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from forge3d.viewer import open_viewer_async
-
 from eo_art.forge3d_pipes.config.schema import AnimationKind, PipelineConfig
 from eo_art.forge3d_pipes.render.animation import build_camera_animation
 from eo_art.forge3d_pipes.render.payloads import (
@@ -35,7 +33,15 @@ class ResolvedOverlay:
 
 
 def _open_viewer(cfg: PipelineConfig, terrain_path: Path) -> Any:
-    """Indirection point so tests can substitute a fake viewer."""
+    """Indirection point so tests can substitute a fake viewer.
+
+    Import kept lazy: a module-level import would run at package-import
+    time (``forge3d_pipes/__init__.py`` -> ``pipeline`` -> ``runner``),
+    before ``gpu.select_gpu`` gets a chance to set the Vulkan ICD
+    environment variables that steer which adapter forge3d binds to.
+    """
+    from forge3d.viewer import open_viewer_async
+
     return open_viewer_async(
         terrain_path=str(terrain_path),
         width=cfg.render.width,

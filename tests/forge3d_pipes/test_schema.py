@@ -4,6 +4,7 @@ from omegaconf.errors import ConfigKeyError, MissingMandatoryValue, ValidationEr
 
 from eo_art.forge3d_pipes.config.schema import (
     Camera,
+    GpuPreference,
     PipelineConfig,
     ShadowTechnique,
     TonemapOperator,
@@ -135,6 +136,26 @@ def test_video_export_with_animation_is_accepted():
         )
     )
     assert cfg.export.video.enabled is True
+
+
+def test_run_gpu_defaults_to_auto():
+    cfg = OmegaConf.to_object(OmegaConf.merge(_base(), {"input": {"path": "dem.tif"}}))
+    assert cfg.run.gpu is GpuPreference.auto
+
+
+def test_run_gpu_accepts_a_valid_value_from_yaml():
+    merged = OmegaConf.merge(
+        _base(), {"input": {"path": "dem.tif"}, "run": {"gpu": "discrete"}}
+    )
+    cfg = OmegaConf.to_object(merged)
+    assert cfg.run.gpu is GpuPreference.discrete
+
+
+def test_run_gpu_rejects_an_invalid_value():
+    with pytest.raises(ValidationError):
+        OmegaConf.merge(
+            _base(), {"input": {"path": "dem.tif"}, "run": {"gpu": "ultra"}}
+        )
 
 
 def test_render_overlay_preserve_colors_defaults_false():

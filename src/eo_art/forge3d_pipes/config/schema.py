@@ -53,6 +53,13 @@ class VideoFormat(Enum):
     gif = "gif"
 
 
+class GpuPreference(Enum):
+    auto = "auto"
+    discrete = "discrete"
+    integrated = "integrated"
+    off = "off"
+
+
 def _in_range(name: str, value: float, low: float, high: float) -> None:
     if not low <= value <= high:
         raise ValueError(f"{name} must be between {low} and {high}, got {value}")
@@ -303,6 +310,7 @@ class Run:
     out_dir: str = "out"
     cache: bool = True
     fail_fast: bool = False
+    gpu: GpuPreference = GpuPreference.auto
 
 
 @dataclass

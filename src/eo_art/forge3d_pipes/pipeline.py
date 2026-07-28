@@ -1,5 +1,6 @@
 """Orchestrates prep -> render -> export for every sweep variant."""
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,11 +11,14 @@ from omegaconf import DictConfig, OmegaConf
 from eo_art.forge3d_pipes.config.loader import load_raw, to_pipeline
 from eo_art.forge3d_pipes.config.schema import PipelineConfig
 from eo_art.forge3d_pipes.export import encode_video, write_resolved_config
+from eo_art.forge3d_pipes.gpu import select_gpu
 from eo_art.forge3d_pipes.prep.extent import compute_normalized_extent
 from eo_art.forge3d_pipes.prep.overlay_image import export_overlay_png_cached
 from eo_art.forge3d_pipes.prep.registry import run_prep_chain
 from eo_art.forge3d_pipes.render.runner import RenderResult, ResolvedOverlay, render
 from eo_art.forge3d_pipes.sweep import Variant, expand
+
+logger = logging.getLogger(__name__)
 
 PREP_CACHE_DIRNAME = "_prep"
 RESOLVED_CONFIG_NAME = "resolved.yaml"
@@ -108,6 +112,9 @@ def run(
     """
     raw = load_raw(configs, overrides, out)
     root = to_pipeline(raw)
+
+    adapter = select_gpu(root.run.gpu)
+    logger.info("gpu: selected adapter %s (preference=%s)", adapter, root.run.gpu.name)
 
     source = Path(root.input.path)
     if not source.exists():
