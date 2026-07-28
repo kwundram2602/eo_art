@@ -15,6 +15,13 @@ import imageio.v3 as iio
 import numpy as np
 import rasterio
 
+from eo_art.forge3d_pipes.prep.ops import _apply_stretch, _percentile_bounds
+
+# Matches RgbStretchCfg's defaults (prep/ops.py) so an overlay that already
+# went through rgb_stretch and one that didn't get the same stretch policy.
+_LOWER_PERCENTILE = 2.0
+_UPPER_PERCENTILE = 98.0
+
 
 def export_overlay_png_cached(
     src: Path, cache_dir: Path, use_cache: bool = True
@@ -38,15 +45,44 @@ def export_overlay_png_cached(
 
 def export_overlay_png(src: Path, dst: Path) -> Path:
     """Write the first three bands of ``src`` (or one band, replicated) as
-    an 8-bit RGB PNG at ``dst``. Values are clipped to [0, 255]."""
-    with rasterio.open(src) as source:
-        if source.count >= 3:
-            bands = source.read([1, 2, 3])
-        else:
-            band = source.read(1)
-            bands = np.stack([band, band, band])
+    an 8-bit RGBA PNG at ``dst``.
 
-    rgb = np.clip(bands, 0, 255).astype("uint8")
+    Alpha comes from the source's validity mask (rasterio's
+    ``read_masks``, which folds in the nodata value, a per-dataset mask, or
+    an existing alpha band). Fully transparent where invalid, fully opaque
+    where valid -- this is what keeps a partially-overlapping overlay from
+    painting solid black over the terrain once it's been clipped to the
+    DEM's full extent (see the ``align_to`` prep op).
+
+    Value range is dtype-driven: a floating-point source is
+    percentile-stretched to [0, 255], an integer source is clipped as
+    before. In this pipeline a float raster is never already 8-bit display
+    data, so a uint8-range float overlay (e.g. one promoted by
+    ``reproject``'s ``dtype: auto``) still round-trips correctly --
+    percentile-stretching values already in [0, 255] maps them back onto
+    approximately the same range.
+    """
+    with rasterio.open(src) as source:
+        indexes = [1, 2, 3] if source.count >= 3 else [1]
+        is_float = np.issubdtype(np.dtype(source.dtypes[0]), np.floating)
+        bands = source.read(indexes)
+        # min(), not any()/all(): a pixel counts as valid only where every
+        # band read contributes to it, matching how the three channels are
+        # about to be merged into one RGB(A) pixel.
+        alpha = source.read_masks(indexes).min(axis=0).astype("uint8")
+
+    if len(indexes) == 1:
+        bands = np.repeat(bands, 3, axis=0)
+
+    if is_float:
+        bands = bands.astype("float64")
+        pooled = bands[:, alpha > 0].ravel()
+        lo, hi = _percentile_bounds(pooled, _LOWER_PERCENTILE, _UPPER_PERCENTILE)
+        rgb = _apply_stretch(bands, lo, hi)
+    else:
+        rgb = np.clip(bands, 0, 255).astype("uint8")
+
     rgb = np.moveaxis(rgb, 0, -1)
-    iio.imwrite(dst, rgb)
+    rgba = np.dstack([rgb, alpha])
+    iio.imwrite(dst, rgba)
     return Path(dst)

@@ -214,6 +214,11 @@ class OverlayCfg:
     name: str = MISSING
     path: str = MISSING
     prepare: list[Any] = field(default_factory=list)
+    # The DEM and this overlay are typically reprojected independently, each
+    # via its own `reproject` op picking its own destination grid -- so
+    # without this, any alignment `acquire` established upstream is lost by
+    # the time both reach the renderer. See pipeline.py's `_run_variant`.
+    align_to_dem: bool = True
     opacity: float | None = None
     z_order: int | None = None
     # Manual UV override (u0, v0, u1, v1); auto-computed from geo bounds when

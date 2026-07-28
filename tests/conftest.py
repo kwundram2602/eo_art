@@ -59,7 +59,14 @@ def synthetic_dem_int16(tmp_path):
 def synthetic_overlay(tmp_path):
     """Partially overlaps ``synthetic_dem``: shifted +0.016 deg east/south so
     it extends past the DEM's east and south edges but overlaps its
-    northwest, exercising clamping in both U and V."""
+    northwest, exercising clamping in both U and V.
+
+    ``nodata`` is set (to a value the constant fill never takes) so that
+    aligning this overlay onto the DEM's larger grid -- which fills the
+    area outside the overlay's original footprint -- produces pixels that
+    rasterio's validity mask actually recognizes as invalid, the way a real
+    partial-coverage raster normally would.
+    """
     width = height = 32
     data = np.full((height, width), 0.5, dtype="float32")
     path = tmp_path / "overlay.tif"
@@ -72,6 +79,7 @@ def synthetic_overlay(tmp_path):
         count=1,
         dtype="float32",
         crs="EPSG:4326",
+        nodata=-9999.0,
         transform=from_origin(-121.784, 46.884, 0.001, 0.001),
     ) as dst:
         dst.write(data, 1)

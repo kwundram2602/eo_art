@@ -14,6 +14,7 @@ def test_ops_are_registered():
     assert registry.get_op("scale_to_gsd").schema is ops.ScaleToGsdCfg
     assert registry.get_op("saturate").schema is ops.SaturateCfg
     assert registry.get_op("rgb_stretch").schema is ops.RgbStretchCfg
+    assert registry.get_op("align_to").schema is ops.AlignToCfg
     assert ops.RgbStretchCfg().shared_stretch is True
 
 
@@ -78,6 +79,82 @@ def test_chain_of_both_ops_runs(synthetic_dem, tmp_path):
         # raster the achieved GSD deviates from the target by a few percent:
         # here 12x18 pixels over a 2477x3621m extent yields ~206m, not 200m.
         assert src.res[0] == pytest.approx(200.0, rel=0.05)
+
+
+def test_align_to_matches_reference_grid_exactly(
+    synthetic_dem, synthetic_overlay, tmp_path
+):
+    dst = tmp_path / "aligned.tif"
+    result = ops.align_to(
+        synthetic_overlay, dst, ops.AlignToCfg(reference=str(synthetic_dem))
+    )
+    assert result == dst
+    with rasterio.open(synthetic_dem) as ref, rasterio.open(dst) as out:
+        assert out.crs == ref.crs
+        assert out.transform == ref.transform
+        assert out.width == ref.width
+        assert out.height == ref.height
+
+
+def test_align_to_recouples_independently_reprojected_dem_and_overlay(
+    synthetic_dem, synthetic_overlay, tmp_path
+):
+    """The core regression this task fixes: a DEM and a partially-overlapping
+    overlay, each reprojected independently, land on different grids (each
+    `reproject` call picks its own destination transform) -- `align_to`
+    afterwards must recouple them so the overlay is, once again, exactly the
+    DEM's grid."""
+    from eo_art.forge3d_pipes.prep.extent import compute_normalized_extent
+
+    dem_reprojected = tmp_path / "dem.tif"
+    ops.reproject(synthetic_dem, dem_reprojected, ops.ReprojectCfg(crs="EPSG:32610"))
+    overlay_reprojected = tmp_path / "overlay.tif"
+    ops.reproject(
+        synthetic_overlay, overlay_reprojected, ops.ReprojectCfg(crs="EPSG:32610")
+    )
+
+    with (
+        rasterio.open(dem_reprojected) as dem_out,
+        rasterio.open(overlay_reprojected) as overlay_out,
+    ):
+        # Confirms the two independent reprojections actually diverged --
+        # otherwise the rest of the test would pass trivially.
+        assert dem_out.transform != overlay_out.transform
+
+    aligned = tmp_path / "aligned.tif"
+    ops.align_to(
+        overlay_reprojected, aligned, ops.AlignToCfg(reference=str(dem_reprojected))
+    )
+
+    extent = compute_normalized_extent(dem_reprojected, aligned)
+    assert extent == pytest.approx((0.0, 0.0, 1.0, 1.0))
+
+
+def test_export_overlay_png_alpha_is_transparent_outside_aligned_overlay_coverage(
+    synthetic_dem, synthetic_overlay, tmp_path
+):
+    """Guards against the black-paint regression: `align_to` clips the
+    target to the reference's full extent, filling the area the overlay
+    never covered with nodata. Without an alpha channel that fill would
+    render as opaque black paint over the terrain."""
+    aligned = tmp_path / "aligned.tif"
+    ops.align_to(
+        synthetic_overlay, aligned, ops.AlignToCfg(reference=str(synthetic_dem))
+    )
+
+    png = tmp_path / "aligned.png"
+    export_overlay_png(aligned, png)
+    import imageio.v3 as iio
+
+    pixels = iio.imread(png)
+    assert pixels.shape == (32, 32, 4)
+    alpha = pixels[..., 3]
+    # synthetic_overlay only covers synthetic_dem's south-east quadrant
+    # (rows >= 16, cols >= 16) once aligned -- see test_extent.py's
+    # test_partial_overlap_clamps_to_terrain_bounds for the same geometry.
+    assert (alpha[16:, 16:] == 255).all()
+    assert (alpha[:16, :] == 0).all()
+    assert (alpha[:, :16] == 0).all()
 
 
 def test_reproject_rejects_a_raster_without_a_crs(tmp_path):
@@ -275,16 +352,18 @@ def test_auto_promoted_uint8_overlay_still_round_trips_through_export(tmp_path):
 
     pixels = iio.imread(png)
     assert pixels.dtype == np.uint8
-    assert pixels.shape[2] == 3
-    # Bilinear interpolation is a convex combination of the source samples,
-    # so the reprojected-and-exported PNG must stay within the original
-    # per-channel value range -- proving real color data survived the
-    # uint8 -> float32 -> uint8 round trip rather than collapsing to 0/NaN
-    # or blowing out past the dtype's range.
-    assert 10 <= int(pixels[..., 0].min()) and int(pixels[..., 0].max()) <= 250
-    assert 20 <= int(pixels[..., 1].min()) and int(pixels[..., 1].max()) <= 240
-    assert 30 <= int(pixels[..., 2].min()) and int(pixels[..., 2].max()) <= 230
-    assert int(pixels[..., 0].max()) > int(pixels[..., 0].min())
+    assert pixels.shape[2] == 4
+    assert (pixels[..., 3] == 255).all()  # fully valid source -> fully opaque
+    # The reprojected float32 values are percentile-stretched (they are
+    # display-ranged, not reflectance data, but the dtype-driven rule can't
+    # tell the two apart -- see export_overlay_png's docstring), so the
+    # output no longer matches the pre-reproject values pixel-for-pixel.
+    # What must survive is that the round trip doesn't collapse to
+    # near-black or a single flat value -- the uint8 -> float32 -> uint8
+    # path stays real, varied color data.
+    rgb = pixels[..., :3]
+    assert rgb.max() > 200
+    assert int(rgb.max()) > int(rgb.min())
 
 
 def _write_rgb(path, r, g, b):

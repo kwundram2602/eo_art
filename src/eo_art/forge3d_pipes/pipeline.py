@@ -4,12 +4,16 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from omegaconf import DictConfig, OmegaConf
 
 from eo_art.forge3d_pipes.config.loader import load_raw, to_pipeline
-from eo_art.forge3d_pipes.config.schema import PipelineConfig
+from eo_art.forge3d_pipes.config.schema import (
+    OverlayCfg,
+    PipelineConfig,
+    ResamplingName,
+)
 from eo_art.forge3d_pipes.export import encode_video, write_resolved_config
 from eo_art.forge3d_pipes.gpu import select_gpu
 from eo_art.forge3d_pipes.prep.extent import compute_normalized_extent
@@ -54,6 +58,33 @@ def _plan(
     return plan
 
 
+# The overlay's own prepare chain already picked whatever resampling suits
+# its data; this only re-snaps it onto the DEM's grid, so bilinear (smooth,
+# no ringing) is a safe default. Not config-exposed: no caller has needed
+# anything else for this specific grid-snap step.
+_ALIGN_TO_DEM_RESAMPLING = ResamplingName.bilinear
+
+
+def _overlay_prepare_entries(overlay: OverlayCfg, prepared_dem: Path) -> list[Any]:
+    """Build the prep-chain entries for one overlay.
+
+    Returns a new list rather than mutating ``overlay.prepare`` in place --
+    the latter would leave the injected ``align_to`` entry sitting on the
+    ``OverlayCfg`` itself, so a second sweep variant built from the same
+    config object would inject it again on top of the first.
+    """
+    if not overlay.align_to_dem:
+        return list(overlay.prepare)
+    return [
+        *overlay.prepare,
+        {
+            "op": "align_to",
+            "reference": str(prepared_dem),
+            "resampling": _ALIGN_TO_DEM_RESAMPLING.value,
+        },
+    ]
+
+
 def _run_variant(
     cfg: PipelineConfig,
     merged: DictConfig,
@@ -70,8 +101,9 @@ def _run_variant(
 
     resolved_overlays = []
     for overlay in cfg.overlays:
+        overlay_entries = _overlay_prepare_entries(overlay, prepared)
         overlay_prepared = run_prep_chain(
-            Path(overlay.path), overlay.prepare, cache_dir, use_cache=use_cache
+            Path(overlay.path), overlay_entries, cache_dir, use_cache=use_cache
         )
         extent = (
             tuple(overlay.extent)

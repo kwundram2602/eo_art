@@ -281,7 +281,86 @@ def test_overlay_is_prepped_and_resolved_and_passed_to_render(
     assert resolved.path.suffix == ".png"
     assert resolved.path.exists()
     assert resolved.opacity == 0.5
-    assert resolved.extent == pytest.approx((0.5, 0.0, 1.0, 0.5))
+    # align_to_dem defaults to True, so the overlay is snapped onto the
+    # DEM's grid before compute_normalized_extent runs -- the extent is the
+    # full unit square, not the raw-bounds-approximation (0.5, 0.0, 1.0, 0.5)
+    # a pre-alignment overlay would have produced.
+    assert resolved.extent == pytest.approx((0.0, 0.0, 1.0, 1.0))
+
+
+def test_align_to_dem_false_preserves_bounding_box_extent(
+    tmp_path, synthetic_dem, synthetic_overlay, fake_render
+):
+    """`align_to_dem: false` opts an overlay out of grid coupling entirely,
+    keeping today's bounding-box-approximation extent (see
+    compute_normalized_extent's docstring)."""
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "input": {"path": str(synthetic_dem)},
+                "run": {"name": "test", "out_dir": str(tmp_path / "out")},
+                "overlays": [
+                    {
+                        "name": "ndvi",
+                        "path": str(synthetic_overlay),
+                        "align_to_dem": False,
+                    }
+                ],
+            }
+        )
+    )
+    pipeline.run([path])
+    _, _, _, overlays = fake_render[0]
+    assert overlays[0].extent == pytest.approx((0.5, 0.0, 1.0, 0.5))
+
+
+def test_align_to_dem_default_is_true(synthetic_overlay):
+    from eo_art.forge3d_pipes.config.schema import OverlayCfg
+
+    assert OverlayCfg(name="a", path=str(synthetic_overlay)).align_to_dem is True
+
+
+def test_overlay_prepare_entries_does_not_mutate_overlay_prepare(tmp_path):
+    """A second sweep variant must not inherit the first variant's injected
+    `align_to` entry -- pipeline._overlay_prepare_entries builds a new list
+    rather than appending onto OverlayCfg.prepare in place."""
+    from eo_art.forge3d_pipes.config.schema import OverlayCfg
+    from eo_art.forge3d_pipes.pipeline import _overlay_prepare_entries
+
+    overlay = OverlayCfg(name="a", path="overlay.tif")
+    prepared_dem = tmp_path / "dem.tif"
+
+    first = _overlay_prepare_entries(overlay, prepared_dem)
+    second = _overlay_prepare_entries(overlay, prepared_dem)
+
+    assert overlay.prepare == []
+    assert first == second
+    assert [entry["op"] for entry in first] == ["align_to"]
+
+
+def test_two_sweep_variants_each_get_a_correctly_aligned_overlay(
+    tmp_path, synthetic_dem, synthetic_overlay, fake_render
+):
+    """End-to-end guard: running two sweep variants must not leave the
+    second variant with a doubled-up (or otherwise broken) align_to chain
+    on the shared overlay config."""
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "input": {"path": str(synthetic_dem)},
+                "run": {"name": "test", "out_dir": str(tmp_path / "out")},
+                "overlays": [{"name": "ndvi", "path": str(synthetic_overlay)}],
+            }
+        )
+    )
+    results = pipeline.run(
+        [path], overrides=["sweep.params={render.pbr.exposure: [1.0, 2.0]}"]
+    )
+    assert len(results) == 2 and all(r.ok for r in results)
+    for _, _, _, overlays in fake_render:
+        assert overlays[0].extent == pytest.approx((0.0, 0.0, 1.0, 1.0))
 
 
 def test_overlay_manual_extent_bypasses_auto_compute(

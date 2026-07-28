@@ -12,6 +12,6 @@ prepare:
     resampling: cubic
 
 render:
-  width: 1200
-  height: 720
+  width: 2560
+  height: 1440
   snapshot_name: rainier.png

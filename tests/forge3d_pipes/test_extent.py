@@ -12,6 +12,23 @@ def test_full_overlap_yields_full_unit_extent(synthetic_dem):
     assert extent == pytest.approx((0.0, 0.0, 1.0, 1.0))
 
 
+def test_grid_aligned_overlay_yields_full_unit_extent(
+    synthetic_dem, synthetic_overlay, tmp_path
+):
+    """Once `align_to` has put the overlay on the DEM's exact grid, the
+    overlay's footprint *is* the DEM's footprint -- compute_normalized_extent
+    stays in the pipeline (rather than being replaced by a hardcoded
+    identity) specifically so a future regression in the alignment step
+    would surface here as a wrong extent."""
+    aligned = tmp_path / "aligned.tif"
+    ops.align_to(
+        synthetic_overlay, aligned, ops.AlignToCfg(reference=str(synthetic_dem))
+    )
+
+    extent = compute_normalized_extent(synthetic_dem, aligned)
+    assert extent == pytest.approx((0.0, 0.0, 1.0, 1.0))
+
+
 def test_partial_overlap_clamps_to_terrain_bounds(synthetic_dem, synthetic_overlay):
     extent = compute_normalized_extent(synthetic_dem, synthetic_overlay)
     assert extent == pytest.approx((0.5, 0.0, 1.0, 0.5))

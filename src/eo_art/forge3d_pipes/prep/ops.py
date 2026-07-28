@@ -67,6 +67,12 @@ class ScaleToGsdCfg:
     resampling: ResamplingName = ResamplingName.bilinear
 
 
+@dataclass
+class AlignToCfg:
+    reference: str = MISSING
+    resampling: ResamplingName = ResamplingName.bilinear
+
+
 @register_op("reproject", ReprojectCfg)
 def reproject(src: Path, dst: Path, cfg: ReprojectCfg) -> Path:
     """Reproject a raster to ``cfg.crs``, preserving all bands."""
@@ -107,6 +113,22 @@ def scale_to_gsd(src: Path, dst: Path, cfg: ScaleToGsdCfg) -> Path:
     from vecraspy import scale_raster_to_gsd
 
     scale_raster_to_gsd(src, dst, cfg.target_gsd, resampling=cfg.resampling.value)
+    return Path(dst)
+
+
+@register_op("align_to", AlignToCfg)
+def align_to(src: Path, dst: Path, cfg: AlignToCfg) -> Path:
+    """Snap ``src`` onto ``cfg.reference``'s exact grid via vecraspy.
+
+    Used to re-couple a DEM and an overlay that were reprojected
+    independently: each ``reproject`` call picks its own destination grid
+    (rasterio's ``calculate_default_transform`` per raster), so two rasters
+    reprojected separately land on different pixel grids even when they
+    started perfectly aligned.
+    """
+    from vecraspy import align_raster_grid
+
+    align_raster_grid(cfg.reference, src, dst, resampling=cfg.resampling.value)
     return Path(dst)
 
 
@@ -159,6 +181,16 @@ def _percentile_bounds(
     if hi <= lo:
         hi = lo + 1e-9
     return float(lo), float(hi)
+
+
+def _apply_stretch(band: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    """Linearly map ``[lo, hi]`` to ``[0, 255]`` uint8, clipping outside it.
+
+    Shared by ``rgb_stretch`` and ``export_overlay_png`` so the clip-scale
+    arithmetic exists in exactly one place.
+    """
+    scaled = np.clip((band - lo) / (hi - lo), 0.0, 1.0) * 255.0
+    return scaled.astype("uint8")
 
 
 @dataclass
@@ -228,10 +260,9 @@ def rgb_stretch(src: Path, dst: Path, cfg: RgbStretchCfg) -> Path:
             for band in raw_bands
         ]
 
-    stretched = []
-    for band, (lo, hi) in zip(raw_bands, bounds):
-        scaled = np.clip((band - lo) / (hi - lo), 0.0, 1.0) * 255.0
-        stretched.append(scaled.astype("uint8"))
+    stretched = [
+        _apply_stretch(band, lo, hi) for band, (lo, hi) in zip(raw_bands, bounds)
+    ]
 
     meta.update(count=3, dtype="uint8", nodata=None)
     with rasterio.open(dst, "w", **meta) as destination:
