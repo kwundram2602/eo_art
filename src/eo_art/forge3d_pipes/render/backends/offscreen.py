@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from eo_art.forge3d_pipes.config.schema import PipelineConfig
+from eo_art.forge3d_pipes.config.schema import GpuPreference, PipelineConfig
 from eo_art.forge3d_pipes.render.params import build_terrain_params_kwargs
 from eo_art.forge3d_pipes.render.results import RenderResult, ResolvedOverlay
 
@@ -107,6 +107,42 @@ def _settings_kwargs(plain: dict[str, Any]) -> dict[str, Any]:
     return kwargs
 
 
+def _open_session(cfg: PipelineConfig) -> Any:
+    """Open forge3d's offscreen session, honouring ``run.gpu``.
+
+    ``run.gpu: off`` means "touch nothing" -- ``gpu.select_gpu`` itself
+    changes no environment variables for that preference (see its own
+    early return). Forcing a backend here unconditionally would defeat
+    that intent from a different angle, so ``off`` is the one case where
+    Vulkan is *not* forced: wgpu is left to auto-select across backends,
+    exactly as it did before Vulkan was ever forced for this renderer.
+
+    Every other preference forces ``backend="vulkan"``: it is the only
+    backend ``select_gpu``'s ICD-environment steering can reach (see
+    ``gpu.py``'s module docstring and ``_render_frame`` below for how this
+    was discovered) -- without it, ``Session(window=False)`` auto-selects
+    across *all* wgpu backends and was observed to silently prefer the
+    integrated GPU via the GL backend on a machine with both an Intel iGPU
+    and an NVIDIA discrete GPU, which both ignored the ICD steering and
+    rendered a blank black frame instead of raising.
+    """
+    import forge3d
+
+    if cfg.run.gpu is GpuPreference.off:
+        return forge3d.Session(window=False)
+
+    try:
+        return forge3d.Session(window=False, backend="vulkan")
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "render: the offscreen backend forces the Vulkan wgpu backend "
+            "so that run.gpu's adapter steering (gpu.select_gpu) actually "
+            f"reaches the renderer, but no Vulkan driver was found ({exc}). "
+            "Either install a Vulkan driver, or set run.gpu: off to skip "
+            "GPU steering entirely and let wgpu auto-select a backend."
+        ) from exc
+
+
 def _render_frame(
     cfg: PipelineConfig, terrain_path: Path, overlays: Sequence[ResolvedOverlay]
 ) -> Any:
@@ -142,17 +178,7 @@ def _render_frame(
     # (terrain_demo.py: `return f3d.TerrainRenderParams(config)`).
     params = forge3d.TerrainRenderParams(config)
 
-    # backend="vulkan" is required, not cosmetic: gpu.select_gpu's entire
-    # adapter-steering mechanism works by setting the Vulkan loader's ICD
-    # env vars (see gpu.py's module docstring). Without an explicit backend
-    # here, Session(window=False) auto-selects across *all* wgpu backends
-    # and was observed to silently prefer the integrated GPU via the GL
-    # backend on a machine with both an Intel iGPU and an NVIDIA discrete
-    # GPU -- GL ignores the Vulkan ICD vars entirely, so select_gpu's
-    # steering had no effect, and (separately) that GL path rendered a
-    # blank black frame instead of raising. Forcing Vulkan here is what
-    # makes select_gpu's adapter choice actually reach the renderer.
-    session = forge3d.Session(window=False, backend="vulkan")
+    session = _open_session(cfg)
     renderer = forge3d.TerrainRenderer(session)
     # triplanar_scale/blend_sharpness/normal_strength here are the
     # MaterialSet's own PBR-texture knobs, distinct from the terrain-mesh
