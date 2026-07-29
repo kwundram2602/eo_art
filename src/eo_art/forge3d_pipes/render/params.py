@@ -37,19 +37,20 @@ if TYPE_CHECKING:
 
     from eo_art.forge3d_pipes.render.results import ResolvedOverlay
 
-# forge3d's own FORGE3D_DEBUG_CAMERA trace (terrain_demo.py) computes the eye
-# position as radius * (sin(theta)*cos(phi), cos(theta), sin(theta)*sin(phi))
-# for the default ("screen") camera path -- i.e. theta is the polar angle
-# from the up axis (0 = top-down, 90 = horizon), independent of camera_mode.
-# That is exactly this pipeline's Camera.theta convention (0-90,
-# top-down-to-horizon), and "screen" is the fullscreen-triangle raymarch path
-# the interactive viewer backend already renders through, so it reproduces
-# viewer-backend camera behaviour one-to-one. "mesh" is explicitly documented
-# in terrain_params.py as rendering oblique views rolled (its up vector is a
-# grid axis); "mesh:zup" uses the same theta/phi convention via a true Z-up
-# mesh camera, but there is no evidence the interactive viewer we already
-# render through uses the mesh path, so "screen" is the safer match.
-_CAMERA_MODE = "screen"
+# Empirically determined on a real GPU (source-level reasoning about the
+# FORGE3D_DEBUG_CAMERA trace pointed at "screen" first, and was wrong): with
+# this pipeline's cam_radius/cam_phi_deg/cam_theta_deg wired straight through,
+# "screen" produced a degenerate, washed-out frame that did not change at all
+# when cam_radius was varied by 3x -- i.e. it is not consuming these fields as
+# an orbit camera the way this pipeline needs. "mesh" matches its own
+# documented defect (oblique views come out rolled/garbled -- reproduced:
+# a jagged, incoherent close-up). "mesh:zup" is the one that actually works:
+# rendering the same DEM at phi in {0, 90, 180} with theta=60 rotates a
+# marker feature smoothly around the terrain with a level, unrolled horizon
+# at every step, and theta=0 vs theta=85 give a correct top-down vs
+# near-horizon framing -- exactly this pipeline's Camera.theta/phi
+# convention.
+_CAMERA_MODE = "mesh:zup"
 
 # A later task wires real HDRI environment maps into the offscreen backend's
 # env_maps slot (forge3d.IBL has no "disabled" constructor -- see

@@ -69,6 +69,11 @@ def test_input_path_is_mandatory():
         (["render.sun.azimuth=400"], "sun.azimuth"),
         (["render.pbr.msaa=3"], "pbr.msaa"),
         (["render.pbr.height_ao.resolution_scale=1.5"], "resolution_scale"),
+        # forge3d.terrain_params.HeightAoSettings/SunVisibilitySettings both
+        # require resolution_scale in [0.1, 1.0]; below that must fail here,
+        # at config-load, not deep inside the offscreen backend.
+        (["render.pbr.height_ao.resolution_scale=0.05"], "resolution_scale"),
+        (["render.pbr.sun_visibility.resolution_scale=0.05"], "resolution_scale"),
         (["render.width=0"], "render.width"),
         (["animation.fps=0"], "animation.fps"),
         (["animation.fps=2", "animation.orbit.duration=0.1"], "frame interval"),
@@ -285,6 +290,47 @@ def test_offscreen_backend_without_animation_is_accepted():
     )
     cfg = OmegaConf.to_object(merged)
     assert cfg.render.backend is RenderBackend.offscreen
+
+
+def test_offscreen_backend_with_overlays_is_rejected_at_config_load():
+    """forge3d 1.34.0's offscreen renderer does not composite terrain
+    overlays (verified empirically); a configured overlay must error at
+    config-load rather than silently vanish from the rendered image."""
+    merged = OmegaConf.merge(
+        _base(),
+        {
+            "input": {"path": "dem.tif"},
+            "overlays": [{"name": "ndvi", "path": "ndvi.tif"}],
+        },
+        OmegaConf.from_dotlist(["render.backend=offscreen"]),
+    )
+    with pytest.raises(ValueError, match="does not composite terrain overlays"):
+        OmegaConf.to_object(merged)
+
+
+def test_offscreen_backend_without_overlays_is_accepted():
+    merged = OmegaConf.merge(
+        _base(),
+        {"input": {"path": "dem.tif"}},
+        OmegaConf.from_dotlist(["render.backend=offscreen"]),
+    )
+    cfg = OmegaConf.to_object(merged)
+    assert cfg.render.backend is RenderBackend.offscreen
+    assert cfg.overlays == []
+
+
+def test_viewer_backend_with_overlays_is_accepted():
+    merged = OmegaConf.merge(
+        _base(),
+        {
+            "input": {"path": "dem.tif"},
+            "overlays": [{"name": "ndvi", "path": "ndvi.tif"}],
+        },
+        OmegaConf.from_dotlist(["render.backend=viewer"]),
+    )
+    cfg = OmegaConf.to_object(merged)
+    assert cfg.render.backend is RenderBackend.viewer
+    assert len(cfg.overlays) == 1
 
 
 def test_quality_defaults():

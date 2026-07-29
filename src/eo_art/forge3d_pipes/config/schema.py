@@ -123,7 +123,8 @@ class HeightAO:
     resolution_scale: float = 0.5
 
     def __post_init__(self) -> None:
-        _in_range("height_ao.resolution_scale", self.resolution_scale, 0.0, 1.0)
+        # forge3d.terrain_params.HeightAoSettings requires [0.1, 1.0].
+        _in_range("height_ao.resolution_scale", self.resolution_scale, 0.1, 1.0)
 
 
 @dataclass
@@ -138,7 +139,8 @@ class SunVisibility:
     resolution_scale: float = 0.5
 
     def __post_init__(self) -> None:
-        _in_range("sun_visibility.resolution_scale", self.resolution_scale, 0.0, 1.0)
+        # forge3d.terrain_params.SunVisibilitySettings requires [0.1, 1.0].
+        _in_range("sun_visibility.resolution_scale", self.resolution_scale, 0.1, 1.0)
 
 
 @dataclass
@@ -400,4 +402,13 @@ class PipelineConfig:
             raise ValueError(
                 "render.backend=offscreen does not support animation; set "
                 "animation.kind=none or render.backend=viewer"
+            )
+        # forge3d 1.34.0's offscreen renderer does not composite terrain
+        # overlays (verified empirically: rendering the same scene with and
+        # without an overlay produces bit-identical pixels), so a configured
+        # overlay would silently vanish from the image rather than error.
+        if self.render.backend is RenderBackend.offscreen and self.overlays:
+            raise ValueError(
+                "forge3d 1.34.0's offscreen renderer does not composite "
+                "terrain overlays; use backend: viewer"
             )

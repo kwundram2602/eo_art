@@ -81,11 +81,11 @@ def test_camera_fields_mapped_from_config_camera():
     assert kwargs["fov_y_deg"] == 45.0
 
 
-def test_camera_mode_is_screen():
-    # See params.py's _CAMERA_MODE comment: "screen" reproduces the
-    # interactive viewer's camera math, which is what phi/theta/radius/fov
-    # already target in this pipeline.
-    assert _kwargs()["camera_mode"] == "screen"
+def test_camera_mode_is_mesh_zup():
+    # See params.py's _CAMERA_MODE comment: empirically the only mode of the
+    # three that renders phi/theta/radius as a coherent, unrolled orbit
+    # camera with this pipeline's parameters.
+    assert _kwargs()["camera_mode"] == "mesh:zup"
 
 
 def test_sun_fields_mapped():
@@ -435,7 +435,7 @@ def test_kwargs_construct_a_real_terrain_render_params():
     params = make_terrain_params_config(**_settings_kwargs(_kwargs()))
     assert params.size_px == (1200, 720)
     assert params.terrain_span == 1000.0
-    assert params.camera_mode == "screen"
+    assert params.camera_mode == "mesh:zup"
 
 
 @pytest.mark.parametrize(

@@ -135,9 +135,24 @@ def _render_frame(
     plain_kwargs = build_terrain_params_kwargs(
         cfg, terrain_span=terrain_span, domain=domain, overlays=overlays
     )
-    params = make_terrain_params_config(**_settings_kwargs(plain_kwargs))
+    config = make_terrain_params_config(**_settings_kwargs(plain_kwargs))
+    # make_terrain_params_config returns the pure-Python config dataclass;
+    # render_terrain_pbr_pom wants the *native* TerrainRenderParams built
+    # from it -- forge3d's own canonical wiring does the same wrap
+    # (terrain_demo.py: `return f3d.TerrainRenderParams(config)`).
+    params = forge3d.TerrainRenderParams(config)
 
-    session = forge3d.Session(window=False)
+    # backend="vulkan" is required, not cosmetic: gpu.select_gpu's entire
+    # adapter-steering mechanism works by setting the Vulkan loader's ICD
+    # env vars (see gpu.py's module docstring). Without an explicit backend
+    # here, Session(window=False) auto-selects across *all* wgpu backends
+    # and was observed to silently prefer the integrated GPU via the GL
+    # backend on a machine with both an Intel iGPU and an NVIDIA discrete
+    # GPU -- GL ignores the Vulkan ICD vars entirely, so select_gpu's
+    # steering had no effect, and (separately) that GL path rendered a
+    # blank black frame instead of raising. Forcing Vulkan here is what
+    # makes select_gpu's adapter choice actually reach the renderer.
+    session = forge3d.Session(window=False, backend="vulkan")
     renderer = forge3d.TerrainRenderer(session)
     # triplanar_scale/blend_sharpness/normal_strength here are the
     # MaterialSet's own PBR-texture knobs, distinct from the terrain-mesh

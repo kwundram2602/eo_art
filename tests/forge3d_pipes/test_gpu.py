@@ -1,5 +1,7 @@
 import os
 import re
+import subprocess
+import sys
 
 import pytest
 
@@ -180,6 +182,30 @@ def test_integrated_returns_the_real_active_adapter_name():
 
 @pytest.mark.gpu
 def test_discrete_selects_the_real_nvidia_adapter_when_present():
-    """Opt-in: only meaningful on a machine with an NVIDIA Vulkan ICD."""
-    name = gpu.select_gpu(GpuPreference.discrete)
-    assert name is not None and "nvidia" in name.lower()
+    """Opt-in: only meaningful on a machine with an NVIDIA Vulkan ICD.
+
+    Runs in a subprocess. Vulkan ICD env vars are only read once, at loader
+    init inside forge3d's native library, the first time anything in the
+    process touches it -- so if an earlier ``@pytest.mark.gpu`` test in the
+    same pytest run already triggered that init under a different ICD
+    context (e.g. the offscreen/viewer smoke tests, which open a Session
+    without calling ``select_gpu`` first), this assertion would silently
+    pass or fail based on test *order* rather than on what ``select_gpu``
+    actually configured. A fresh subprocess guarantees a fresh Vulkan
+    instance every time, matching what actually happens in production
+    (``pipeline.run`` calls ``select_gpu`` before anything else touches
+    forge3d).
+    """
+    script = (
+        "from eo_art.forge3d_pipes import gpu\n"
+        "from eo_art.forge3d_pipes.config.schema import GpuPreference\n"
+        "name = gpu.select_gpu(GpuPreference.discrete)\n"
+        "assert name is not None and 'nvidia' in name.lower(), name\n"
+    )
+    env = dict(os.environ)
+    for name in _ENV_VARS:
+        env.pop(name, None)
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr

@@ -100,7 +100,18 @@ def test_placeholder_ibl_cleans_up_its_temp_file():
 
 @pytest.mark.gpu
 def test_real_offscreen_render_produces_a_png(synthetic_dem, tmp_path):
-    """Opt-in smoke test: runs the actual forge3d offscreen renderer."""
+    """Opt-in smoke test: runs the actual forge3d offscreen renderer.
+
+    Asserts actual pixel *content*, not just file existence/size: a
+    degenerate (e.g. solid-black) frame still writes a small-but-nonzero
+    PNG, which is exactly the failure mode a size-only assertion missed
+    when ``Session(window=False)`` silently fell back to a non-functional
+    GL/integrated-GPU backend instead of the Vulkan/discrete GPU
+    ``gpu.select_gpu`` had steered the ICD environment towards.
+    """
+    import imageio.v3 as iio
+    import numpy as np
+
     from eo_art.forge3d_pipes.prep import ops
 
     projected = tmp_path / "utm.tif"
@@ -114,3 +125,9 @@ def test_real_offscreen_render_produces_a_png(synthetic_dem, tmp_path):
     result = offscreen.render(cfg, projected, tmp_path / "out")
     assert result.snapshot is not None and result.snapshot.exists()
     assert result.snapshot.stat().st_size > 0
+
+    pixels = iio.imread(result.snapshot)
+    assert pixels[..., :3].std() > 1.0, (
+        "frame is degenerate/flat -- render likely failed"
+    )
+    assert not np.array_equal(pixels[..., :3], np.zeros_like(pixels[..., :3]))
