@@ -4,16 +4,12 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 from omegaconf import DictConfig, OmegaConf
 
 from eo_art.forge3d_pipes.config.loader import load_raw, to_pipeline
-from eo_art.forge3d_pipes.config.schema import (
-    OverlayCfg,
-    PipelineConfig,
-    ResamplingName,
-)
+from eo_art.forge3d_pipes.config.schema import PipelineConfig, ResamplingName
 from eo_art.forge3d_pipes.export import encode_video, write_resolved_config
 from eo_art.forge3d_pipes.gpu import select_gpu
 from eo_art.forge3d_pipes.prep.extent import compute_normalized_extent
@@ -64,25 +60,59 @@ def _plan(
 # anything else for this specific grid-snap step.
 _ALIGN_TO_DEM_RESAMPLING = ResamplingName.bilinear
 
+# The validity mask is a binary 0/255 signal, not continuous data -- any
+# interpolating resampler would blend a covered and an uncovered pixel into
+# some in-between alpha at the boundary instead of the crisp edge the source
+# footprint actually has.
+_VALIDITY_MASK_RESAMPLING = ResamplingName.nearest
 
-def _overlay_prepare_entries(overlay: OverlayCfg, prepared_dem: Path) -> list[Any]:
-    """Build the prep-chain entries for one overlay.
 
-    Returns a new list rather than mutating ``overlay.prepare`` in place --
-    the latter would leave the injected ``align_to`` entry sitting on the
-    ``OverlayCfg`` itself, so a second sweep variant built from the same
-    config object would inject it again on top of the first.
+def _align_overlay_to_dem(
+    overlay_prepared: Path, prepared_dem: Path, cache_dir: Path, use_cache: bool
+) -> tuple[Path, Path]:
+    """Snap an overlay onto the DEM's grid, returning
+    ``(aligned_raster, aligned_validity_mask)``.
+
+    The two are run as separate ``run_prep_chain`` calls (fresh entries
+    lists each time -- never built by mutating anything on the ``OverlayCfg``)
+    so a second sweep variant reusing the same config gets independent,
+    correctly-cached results rather than an accumulated chain.
+
+    The mask exists because ``align_to`` alone isn't safe here: it only
+    fills the area outside the overlay's original footprint with nodata if
+    the overlay's source dataset already declared one. An overlay with none
+    set -- a plausible, unremarkable satellite export -- would otherwise
+    come out of alignment reading as fully valid everywhere, including the
+    fill, which paints solid black over the DEM once exported (see
+    ``validity_mask``'s docstring in prep/ops.py for the mechanism this
+    avoids).
     """
-    if not overlay.align_to_dem:
-        return list(overlay.prepare)
-    return [
-        *overlay.prepare,
-        {
-            "op": "align_to",
-            "reference": str(prepared_dem),
-            "resampling": _ALIGN_TO_DEM_RESAMPLING.value,
-        },
-    ]
+    aligned = run_prep_chain(
+        overlay_prepared,
+        [
+            {
+                "op": "align_to",
+                "reference": str(prepared_dem),
+                "resampling": _ALIGN_TO_DEM_RESAMPLING.value,
+            }
+        ],
+        cache_dir,
+        use_cache=use_cache,
+    )
+    aligned_mask = run_prep_chain(
+        overlay_prepared,
+        [
+            {"op": "validity_mask"},
+            {
+                "op": "align_to",
+                "reference": str(prepared_dem),
+                "resampling": _VALIDITY_MASK_RESAMPLING.value,
+            },
+        ],
+        cache_dir,
+        use_cache=use_cache,
+    )
+    return aligned, aligned_mask
 
 
 def _run_variant(
@@ -101,10 +131,26 @@ def _run_variant(
 
     resolved_overlays = []
     for overlay in cfg.overlays:
-        overlay_entries = _overlay_prepare_entries(overlay, prepared)
         overlay_prepared = run_prep_chain(
-            Path(overlay.path), overlay_entries, cache_dir, use_cache=use_cache
+            Path(overlay.path), overlay.prepare, cache_dir, use_cache=use_cache
         )
+
+        alpha_src = None
+        if overlay.align_to_dem:
+            if overlay.extent is None:
+                # align_raster_grid clips silently to the reference's extent
+                # instead of raising for a non-overlapping source, so a
+                # disjoint overlay would otherwise align to an all-fill
+                # raster and proceed without error. Check overlap on the
+                # pre-alignment bounds first, while a real mismatch is still
+                # detectable. Skipped when extent is given manually, to
+                # match compute_normalized_extent not being called at all
+                # in that case.
+                compute_normalized_extent(prepared, overlay_prepared)
+            overlay_prepared, alpha_src = _align_overlay_to_dem(
+                overlay_prepared, prepared, cache_dir, use_cache
+            )
+
         extent = (
             tuple(overlay.extent)
             if overlay.extent is not None
@@ -114,7 +160,7 @@ def _run_variant(
         # `image` crate, which does not support TIFF; every prep op writes
         # GeoTIFF, so the final prepped raster must be re-exported as a PNG.
         overlay_png = export_overlay_png_cached(
-            overlay_prepared, cache_dir, use_cache=use_cache
+            overlay_prepared, cache_dir, use_cache=use_cache, alpha_src=alpha_src
         )
         resolved_overlays.append(
             ResolvedOverlay(

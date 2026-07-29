@@ -1,4 +1,5 @@
 import pytest
+import rasterio
 import yaml
 
 from eo_art.forge3d_pipes import pipeline
@@ -321,22 +322,93 @@ def test_align_to_dem_default_is_true(synthetic_overlay):
     assert OverlayCfg(name="a", path=str(synthetic_overlay)).align_to_dem is True
 
 
-def test_overlay_prepare_entries_does_not_mutate_overlay_prepare(tmp_path):
-    """A second sweep variant must not inherit the first variant's injected
-    `align_to` entry -- pipeline._overlay_prepare_entries builds a new list
-    rather than appending onto OverlayCfg.prepare in place."""
-    from eo_art.forge3d_pipes.config.schema import OverlayCfg
-    from eo_art.forge3d_pipes.pipeline import _overlay_prepare_entries
+def test_align_overlay_to_dem_is_stable_across_repeated_calls(
+    synthetic_dem, synthetic_overlay, tmp_path
+):
+    """A second sweep variant must not leave the overlay's own aligned
+    output corrupted or doubled-up -- calling `_align_overlay_to_dem` twice
+    on the same inputs (as two variants sharing an unchanged overlay would)
+    must produce the same, still-correctly-aligned result each time."""
+    from eo_art.forge3d_pipes.pipeline import _align_overlay_to_dem
 
-    overlay = OverlayCfg(name="a", path="overlay.tif")
-    prepared_dem = tmp_path / "dem.tif"
+    cache_dir = tmp_path / "cache"
+    first_raster, first_mask = _align_overlay_to_dem(
+        synthetic_overlay, synthetic_dem, cache_dir, use_cache=True
+    )
+    second_raster, second_mask = _align_overlay_to_dem(
+        synthetic_overlay, synthetic_dem, cache_dir, use_cache=True
+    )
 
-    first = _overlay_prepare_entries(overlay, prepared_dem)
-    second = _overlay_prepare_entries(overlay, prepared_dem)
+    assert first_raster == second_raster
+    assert first_mask == second_mask
+    with rasterio.open(synthetic_dem) as ref, rasterio.open(first_raster) as out:
+        assert out.transform == ref.transform
+        assert out.width == ref.width and out.height == ref.height
 
-    assert overlay.prepare == []
-    assert first == second
-    assert [entry["op"] for entry in first] == ["align_to"]
+
+def test_no_nodata_overlay_through_default_align_to_dem_path_is_transparent(
+    tmp_path, synthetic_dem, synthetic_overlay, fake_render
+):
+    """The Critical regression this fix addresses, exercised through the
+    real default (`align_to_dem: true`, no explicit override) pipeline.run
+    path rather than calling the ops directly: `synthetic_overlay` carries
+    no nodata, so without a carried-through validity mask the area it
+    doesn't cover would come out of alignment reading as opaque black."""
+    import imageio.v3 as iio
+
+    with rasterio.open(synthetic_overlay) as src:
+        assert src.nodata is None
+
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "input": {"path": str(synthetic_dem)},
+                "run": {"name": "test", "out_dir": str(tmp_path / "out")},
+                "overlays": [{"name": "ndvi", "path": str(synthetic_overlay)}],
+            }
+        )
+    )
+    pipeline.run([path])
+    _, _, _, overlays = fake_render[0]
+    resolved = overlays[0]
+
+    pixels = iio.imread(resolved.path)
+    assert pixels.shape == (32, 32, 4)
+    alpha = pixels[..., 3]
+    # Same south-east-quadrant coverage as test_extent.py's
+    # test_partial_overlap_clamps_to_terrain_bounds.
+    assert (alpha[16:, 16:] == 255).all()
+    assert (alpha[:16, :] == 0).all()
+    assert (alpha[:, :16] == 0).all()
+
+
+def test_disjoint_overlay_fails_fast_through_default_align_to_dem_path(
+    tmp_path, synthetic_dem, disjoint_overlay, monkeypatch
+):
+    """Important regression: align_raster_grid never raises for a
+    non-overlapping source (it just clips to an all-fill raster), so
+    without an explicit pre-alignment overlap check a disjoint overlay
+    would silently proceed instead of failing the way it did before
+    align_to_dem existed."""
+
+    def _render(cfg, terrain_path, out_dir, overlays=()):
+        raise AssertionError("render must not be reached")
+
+    monkeypatch.setattr(pipeline, "render", _render)
+
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "input": {"path": str(synthetic_dem)},
+                "run": {"name": "test", "out_dir": str(tmp_path / "out")},
+                "overlays": [{"name": "ndvi", "path": str(disjoint_overlay)}],
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="does not overlap"):
+        pipeline.run([path], fail_fast=True)
 
 
 def test_two_sweep_variants_each_get_a_correctly_aligned_overlay(
@@ -479,9 +551,9 @@ def test_overlay_png_export_is_cached_across_sweep_variants(
     calls = []
     original = pipeline.export_overlay_png_cached
 
-    def _counting(src, cache_dir, use_cache=True):
+    def _counting(src, cache_dir, use_cache=True, alpha_src=None):
         calls.append(src)
-        return original(src, cache_dir, use_cache)
+        return original(src, cache_dir, use_cache, alpha_src=alpha_src)
 
     monkeypatch.setattr(pipeline, "export_overlay_png_cached", _counting)
 

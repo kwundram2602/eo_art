@@ -15,6 +15,7 @@ def test_ops_are_registered():
     assert registry.get_op("saturate").schema is ops.SaturateCfg
     assert registry.get_op("rgb_stretch").schema is ops.RgbStretchCfg
     assert registry.get_op("align_to").schema is ops.AlignToCfg
+    assert registry.get_op("validity_mask").schema is ops.ValidityMaskCfg
     assert ops.RgbStretchCfg().shared_stretch is True
 
 
@@ -96,6 +97,60 @@ def test_align_to_matches_reference_grid_exactly(
         assert out.height == ref.height
 
 
+def test_validity_mask_reflects_source_nodata(tmp_path):
+    src = tmp_path / "src.tif"
+    band = np.full((4, 4), 0.5, dtype="float32")
+    band[0, 0] = -9999.0
+    with rasterio.open(
+        src,
+        "w",
+        driver="GTiff",
+        width=4,
+        height=4,
+        count=1,
+        dtype="float32",
+        crs="EPSG:4326",
+        nodata=-9999.0,
+        transform=from_origin(0.0, 1.0, 0.01, 0.01),
+    ) as dst:
+        dst.write(band, 1)
+
+    out_path = tmp_path / "mask.tif"
+    result = ops.validity_mask(src, out_path, ops.ValidityMaskCfg())
+    assert result == out_path
+    with rasterio.open(out_path) as out:
+        assert out.count == 1
+        assert out.dtypes[0] == "uint8"
+        assert out.nodata is None
+        mask = out.read(1)
+    assert mask[0, 0] == 0
+    assert (mask.ravel()[1:] == 255).all()
+
+
+def test_validity_mask_is_all_valid_when_source_has_no_nodata(tmp_path):
+    """The scenario the black-paint regression hinges on: a source with no
+    nodata declared has no invalid pixels *of its own* -- the mask is only
+    meaningful once it's aligned onto a larger reference grid."""
+    src = tmp_path / "src.tif"
+    with rasterio.open(
+        src,
+        "w",
+        driver="GTiff",
+        width=4,
+        height=4,
+        count=1,
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=from_origin(0.0, 1.0, 0.01, 0.01),
+    ) as dst:
+        dst.write(np.full((4, 4), 0.5, dtype="float32"), 1)
+
+    out_path = tmp_path / "mask.tif"
+    ops.validity_mask(src, out_path, ops.ValidityMaskCfg())
+    with rasterio.open(out_path) as out:
+        assert (out.read(1) == 255).all()
+
+
 def test_align_to_recouples_independently_reprojected_dem_and_overlay(
     synthetic_dem, synthetic_overlay, tmp_path
 ):
@@ -130,20 +185,37 @@ def test_align_to_recouples_independently_reprojected_dem_and_overlay(
     assert extent == pytest.approx((0.0, 0.0, 1.0, 1.0))
 
 
-def test_export_overlay_png_alpha_is_transparent_outside_aligned_overlay_coverage(
+def test_validity_mask_then_align_to_is_transparent_outside_aligned_overlay_coverage(
     synthetic_dem, synthetic_overlay, tmp_path
 ):
-    """Guards against the black-paint regression: `align_to` clips the
-    target to the reference's full extent, filling the area the overlay
-    never covered with nodata. Without an alpha channel that fill would
-    render as opaque black paint over the terrain."""
+    """Guards against the black-paint regression, for the case that breaks
+    `align_to` alone: `synthetic_overlay` has no nodata declared (a
+    plausible plain satellite export), so `align_raster_grid` fills the
+    area the overlay never covered with an untagged `0` -- nothing marks it
+    invalid. `validity_mask`, captured before alignment and aligned
+    alongside the main raster (mirroring pipeline._align_overlay_to_dem),
+    is what actually carries the correct answer through."""
+    with rasterio.open(synthetic_overlay) as src:
+        assert src.nodata is None  # the scenario this test exists to cover
+
+    mask = tmp_path / "mask.tif"
+    ops.validity_mask(synthetic_overlay, mask, ops.ValidityMaskCfg())
+
     aligned = tmp_path / "aligned.tif"
     ops.align_to(
         synthetic_overlay, aligned, ops.AlignToCfg(reference=str(synthetic_dem))
     )
+    aligned_mask = tmp_path / "aligned_mask.tif"
+    ops.align_to(
+        mask,
+        aligned_mask,
+        ops.AlignToCfg(
+            reference=str(synthetic_dem), resampling=ops.ResamplingName.nearest
+        ),
+    )
 
     png = tmp_path / "aligned.png"
-    export_overlay_png(aligned, png)
+    export_overlay_png(aligned, png, alpha_src=aligned_mask)
     import imageio.v3 as iio
 
     pixels = iio.imread(png)
@@ -155,6 +227,25 @@ def test_export_overlay_png_alpha_is_transparent_outside_aligned_overlay_coverag
     assert (alpha[16:, 16:] == 255).all()
     assert (alpha[:16, :] == 0).all()
     assert (alpha[:, :16] == 0).all()
+
+
+def test_export_overlay_png_without_alpha_src_ignores_untagged_alignment_fill(
+    synthetic_dem, synthetic_overlay, tmp_path
+):
+    """The negative case proving the above test exercises a real bug:
+    without `alpha_src`, export_overlay_png has no way to tell the
+    untagged fill from real coverage, so the whole raster reads as opaque."""
+    aligned = tmp_path / "aligned.tif"
+    ops.align_to(
+        synthetic_overlay, aligned, ops.AlignToCfg(reference=str(synthetic_dem))
+    )
+
+    png = tmp_path / "aligned.png"
+    export_overlay_png(aligned, png)
+    import imageio.v3 as iio
+
+    pixels = iio.imread(png)
+    assert (pixels[..., 3] == 255).all()
 
 
 def test_reproject_rejects_a_raster_without_a_crs(tmp_path):

@@ -132,6 +132,45 @@ def align_to(src: Path, dst: Path, cfg: AlignToCfg) -> Path:
     return Path(dst)
 
 
+def _rgb_band_indexes(count: int) -> list[int]:
+    """1-indexed bands ``export_overlay_png`` treats as R, G, B: the first
+    three, or the sole band read three times over. Shared with
+    ``validity_mask`` so both agree on which bands' validity counts."""
+    return [1, 2, 3] if count >= 3 else [1]
+
+
+@dataclass
+class ValidityMaskCfg:
+    pass
+
+
+@register_op("validity_mask", ValidityMaskCfg)
+def validity_mask(src: Path, dst: Path, cfg: ValidityMaskCfg) -> Path:
+    """Snapshot ``src``'s current per-pixel validity as a standalone
+    single-band uint8 raster (0/255), with no nodata of its own.
+
+    Exists to survive a downstream ``align_to``: ``vecraspy.align_raster_grid``
+    only fills the area outside the source's footprint with nodata if the
+    source dataset already declares one -- an overlay with none set (a
+    plausible plain satellite export, no unusual authoring) instead gets a
+    validity-less ``0`` fill that ``read_masks()`` then reports as fully
+    valid, i.e. opaque black painted over the terrain. This file has no
+    such metadata to lose: aligning it alongside the main raster (see
+    ``pipeline._align_overlay_to_dem``) produces a 0/255 fill purely from
+    the geometry of what the source did or didn't cover, independent of
+    whether the source ever set nodata.
+    """
+    with rasterio.open(src) as source:
+        indexes = _rgb_band_indexes(source.count)
+        mask = source.read_masks(indexes).min(axis=0).astype("uint8")
+        meta = source.meta.copy()
+
+    meta.update(count=1, dtype="uint8", nodata=None)
+    with rasterio.open(dst, "w", **meta) as destination:
+        destination.write(mask, 1)
+    return Path(dst)
+
+
 @dataclass
 class SaturateCfg:
     factor: float = 1.0  # 0 = grayscale, 1 = unchanged, >1 = more vivid

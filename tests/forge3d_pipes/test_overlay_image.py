@@ -191,9 +191,9 @@ def test_export_overlay_png_cached_ignores_cache_when_disabled(tmp_path, monkeyp
     calls = []
     original = overlay_image.export_overlay_png
 
-    def _counting(s, d):
+    def _counting(s, d, alpha_src=None):
         calls.append(s)
-        return original(s, d)
+        return original(s, d, alpha_src=alpha_src)
 
     monkeypatch.setattr(overlay_image, "export_overlay_png", _counting)
 

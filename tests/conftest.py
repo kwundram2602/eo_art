@@ -61,11 +61,11 @@ def synthetic_overlay(tmp_path):
     it extends past the DEM's east and south edges but overlaps its
     northwest, exercising clamping in both U and V.
 
-    ``nodata`` is set (to a value the constant fill never takes) so that
-    aligning this overlay onto the DEM's larger grid -- which fills the
-    area outside the overlay's original footprint -- produces pixels that
-    rasterio's validity mask actually recognizes as invalid, the way a real
-    partial-coverage raster normally would.
+    Deliberately carries no ``nodata`` -- a plain satellite export commonly
+    doesn't declare one, and that's exactly the case the alignment/export
+    path must handle correctly (see ``validity_mask`` in prep/ops.py):
+    alpha for a partial overlay must come out right regardless of whether
+    the source dataset happens to flag its own invalid pixels.
     """
     width = height = 32
     data = np.full((height, width), 0.5, dtype="float32")
@@ -79,7 +79,6 @@ def synthetic_overlay(tmp_path):
         count=1,
         dtype="float32",
         crs="EPSG:4326",
-        nodata=-9999.0,
         transform=from_origin(-121.784, 46.884, 0.001, 0.001),
     ) as dst:
         dst.write(data, 1)
