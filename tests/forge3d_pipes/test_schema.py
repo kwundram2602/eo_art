@@ -5,7 +5,9 @@ from omegaconf.errors import ConfigKeyError, MissingMandatoryValue, ValidationEr
 from eo_art.forge3d_pipes.config.schema import (
     Camera,
     GpuPreference,
+    MipFilter,
     PipelineConfig,
+    RenderBackend,
     ShadowTechnique,
     TonemapOperator,
 )
@@ -243,6 +245,123 @@ def test_overlay_extent_non_positive_area_rejected(extent):
     )
     with pytest.raises(ValueError, match="positive area"):
         OmegaConf.to_object(merged)
+
+
+def test_render_backend_defaults_to_viewer():
+    cfg = OmegaConf.to_object(OmegaConf.merge(_base(), {"input": {"path": "dem.tif"}}))
+    assert cfg.render.backend is RenderBackend.viewer
+
+
+def test_render_backend_accepts_offscreen_from_yaml():
+    merged = OmegaConf.merge(
+        _base(), {"input": {"path": "dem.tif"}, "render": {"backend": "offscreen"}}
+    )
+    cfg = OmegaConf.to_object(merged)
+    assert cfg.render.backend is RenderBackend.offscreen
+
+
+def test_render_backend_rejects_an_invalid_value():
+    with pytest.raises(ValidationError):
+        OmegaConf.merge(
+            _base(), {"input": {"path": "dem.tif"}, "render": {"backend": "gpu"}}
+        )
+
+
+def test_offscreen_backend_with_animation_is_rejected_at_config_load():
+    merged = OmegaConf.merge(
+        _base(),
+        {"input": {"path": "dem.tif"}},
+        OmegaConf.from_dotlist(["render.backend=offscreen", "animation.kind=orbit"]),
+    )
+    with pytest.raises(ValueError, match="does not support animation"):
+        OmegaConf.to_object(merged)
+
+
+def test_offscreen_backend_without_animation_is_accepted():
+    merged = OmegaConf.merge(
+        _base(),
+        {"input": {"path": "dem.tif"}},
+        OmegaConf.from_dotlist(["render.backend=offscreen", "animation.kind=none"]),
+    )
+    cfg = OmegaConf.to_object(merged)
+    assert cfg.render.backend is RenderBackend.offscreen
+
+
+def test_quality_defaults():
+    cfg = OmegaConf.to_object(OmegaConf.merge(_base(), {"input": {"path": "dem.tif"}}))
+    assert cfg.render.quality.render_scale == 1.0
+    assert cfg.render.quality.aa_samples == 1
+    assert cfg.render.quality.anisotropy == 8
+    assert cfg.render.quality.mip_filter is MipFilter.linear
+    assert cfg.render.quality.pom_enabled is False
+    assert cfg.render.quality.overlay_resolution_scale == 1.0
+
+
+@pytest.mark.parametrize(
+    ("dotlist", "message"),
+    [
+        (["render.quality.render_scale=0.24"], "render_scale"),
+        (["render.quality.render_scale=4.01"], "render_scale"),
+        (["render.quality.aa_samples=32"], "aa_samples"),
+        (["render.quality.anisotropy=0"], "anisotropy"),
+        (["render.quality.anisotropy=17"], "anisotropy"),
+        (["render.quality.overlay_resolution_scale=0.09"], "overlay_resolution_scale"),
+        (["render.quality.overlay_resolution_scale=2.01"], "overlay_resolution_scale"),
+    ],
+)
+def test_quality_range_validation_rejects_bad_values(dotlist, message):
+    merged = OmegaConf.merge(
+        _base(),
+        {"input": {"path": "dem.tif"}},
+        OmegaConf.from_dotlist(dotlist),
+    )
+    with pytest.raises(ValueError, match=message):
+        OmegaConf.to_object(merged)
+
+
+@pytest.mark.parametrize("value", [0.25, 1.0, 4.0])
+def test_quality_render_scale_boundary_values_accepted(value):
+    merged = OmegaConf.merge(
+        _base(),
+        {"input": {"path": "dem.tif"}},
+        OmegaConf.from_dotlist([f"render.quality.render_scale={value}"]),
+    )
+    cfg = OmegaConf.to_object(merged)
+    assert cfg.render.quality.render_scale == value
+
+
+@pytest.mark.parametrize("value", [1, 16, 64, 256])
+def test_quality_aa_samples_accepts_valid_values(value):
+    merged = OmegaConf.merge(
+        _base(),
+        {"input": {"path": "dem.tif"}},
+        OmegaConf.from_dotlist([f"render.quality.aa_samples={value}"]),
+    )
+    cfg = OmegaConf.to_object(merged)
+    assert cfg.render.quality.aa_samples == value
+
+
+def test_quality_mip_filter_accepts_nearest():
+    merged = OmegaConf.merge(
+        _base(),
+        {
+            "input": {"path": "dem.tif"},
+            "render": {"quality": {"mip_filter": "nearest"}},
+        },
+    )
+    cfg = OmegaConf.to_object(merged)
+    assert cfg.render.quality.mip_filter is MipFilter.nearest
+
+
+def test_quality_mip_filter_rejects_invalid_value():
+    with pytest.raises(ValidationError):
+        OmegaConf.merge(
+            _base(),
+            {
+                "input": {"path": "dem.tif"},
+                "render": {"quality": {"mip_filter": "bicubic"}},
+            },
+        )
 
 
 def test_multiple_overlays_each_validated_independently():

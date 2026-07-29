@@ -63,6 +63,16 @@ class GpuPreference(Enum):
     off = "off"
 
 
+class RenderBackend(Enum):
+    viewer = "viewer"
+    offscreen = "offscreen"
+
+
+class MipFilter(Enum):
+    linear = "linear"
+    nearest = "nearest"
+
+
 def _in_range(name: str, value: float, low: float, high: float) -> None:
     if not low <= value <= high:
         raise ValueError(f"{name} must be between {low} and {high}, got {value}")
@@ -194,14 +204,49 @@ class Pbr:
 
 
 @dataclass
+class Quality:
+    """Offscreen-only image-quality knobs; inert while ``render.backend`` is
+    ``viewer``. Ranges mirror what ``forge3d.terrain_params`` itself enforces,
+    so a bad value fails at config-load rather than deep inside the renderer.
+    """
+
+    render_scale: float = 1.0
+    aa_samples: int = 1
+    anisotropy: int = 8
+    mip_filter: MipFilter = MipFilter.linear
+    # Only the enable flag is exposed; POM's many sub-fields (mode, scale,
+    # step counts) stay at forge3d's own defaults until a later task shows a
+    # reason to widen this. YAGNI.
+    pom_enabled: bool = False
+    overlay_resolution_scale: float = 1.0
+
+    def __post_init__(self) -> None:
+        _in_range("quality.render_scale", self.render_scale, 0.25, 4.0)
+        if self.aa_samples not in (1, 16, 64, 256):
+            raise ValueError(
+                "quality.aa_samples must be one of 1, 16, 64, 256; "
+                f"got {self.aa_samples}"
+            )
+        _in_range("quality.anisotropy", self.anisotropy, 1, 16)
+        _in_range(
+            "quality.overlay_resolution_scale",
+            self.overlay_resolution_scale,
+            0.1,
+            2.0,
+        )
+
+
+@dataclass
 class Render:
     width: int = 1200
     height: int = 720
     snapshot_name: str = "snapshot.png"
+    backend: RenderBackend = RenderBackend.viewer
     camera: Camera = field(default_factory=Camera)
     sun: Sun = field(default_factory=Sun)
     terrain: Terrain = field(default_factory=Terrain)
     pbr: Pbr = field(default_factory=Pbr)
+    quality: Quality = field(default_factory=Quality)
     overlay_preserve_colors: bool = False
 
     def __post_init__(self) -> None:
@@ -345,4 +390,14 @@ class PipelineConfig:
                 "export.video.enabled requires an animation, but "
                 "animation.kind is 'none'; set animation.kind=orbit or "
                 "disable export.video.enabled"
+            )
+        # The offscreen backend renders one still frame per call; it has no
+        # animation loop (that stays the interactive viewer's job).
+        if (
+            self.render.backend is RenderBackend.offscreen
+            and self.animation.kind is not AnimationKind.none
+        ):
+            raise ValueError(
+                "render.backend=offscreen does not support animation; set "
+                "animation.kind=none or render.backend=viewer"
             )
