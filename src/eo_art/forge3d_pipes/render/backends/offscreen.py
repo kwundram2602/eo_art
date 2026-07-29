@@ -119,12 +119,11 @@ def _open_session(cfg: PipelineConfig) -> Any:
 
     Every other preference forces ``backend="vulkan"``: it is the only
     backend ``select_gpu``'s ICD-environment steering can reach (see
-    ``gpu.py``'s module docstring and ``_render_frame`` below for how this
-    was discovered) -- without it, ``Session(window=False)`` auto-selects
-    across *all* wgpu backends and was observed to silently prefer the
-    integrated GPU via the GL backend on a machine with both an Intel iGPU
-    and an NVIDIA discrete GPU, which both ignored the ICD steering and
-    rendered a blank black frame instead of raising.
+    ``gpu.py``'s module docstring) -- without it, ``Session(window=False)``
+    auto-selects across *all* wgpu backends and was observed to silently
+    prefer the integrated GPU via the GL backend on a machine with both an
+    Intel iGPU and an NVIDIA discrete GPU, which both ignored the ICD
+    steering and rendered a blank black frame instead of raising.
     """
     import forge3d
 
