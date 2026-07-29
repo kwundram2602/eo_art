@@ -6,15 +6,15 @@ import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from vecraspy import align_raster_grid, super_resolve_dtm
+from vecraspy import align_raster_grid, simulate_thermal_erosion, super_resolve_dtm
 
-from eo_art.forge3d_pipes.acquire.schema import AcquireConfig
+from eo_art.forge3d_pipes.acquire.schema import AcquireConfig, DemSource, DtmMode
 from eo_art.forge3d_pipes.acquire.sentinel_bridge import (
     Scene,
     read_aoi_center,
     run_sentinel_sr,
 )
-from eo_art.forge3d_pipes.acquire.terrain import fetch_terrain_dem
+from eo_art.forge3d_pipes.acquire.terrain import fetch_local_dem, fetch_terrain_dem
 
 CACHE_DIRNAME = "_acquire"
 DTM_FILENAME = "dtm.tif"
@@ -89,25 +89,46 @@ def run_acquire(
             )
         reference_tif = _select_reference(written, cfg.sentinel.reference_index)
 
-        raw_dem = fetch_terrain_dem(
-            reference_tif,
-            cache_dir,
-            source=cfg.dem.source,
-            ee_project=cfg.ee_project,
-            scale=cfg.dem.scale,
-        )
+        if cfg.dem.source is DemSource.local:
+            # Dem.__post_init__ requires path to be set for a local source.
+            assert cfg.dem.path is not None
+            raw_dem = fetch_local_dem(reference_tif, cache_dir, path=cfg.dem.path)
+        else:
+            # AcquireConfig.__post_init__ requires ee_project for any
+            # non-local source.
+            assert cfg.ee_project is not None
+            raw_dem = fetch_terrain_dem(
+                reference_tif,
+                cache_dir,
+                source=cfg.dem.source,
+                ee_project=cfg.ee_project,
+                scale=cfg.dem.scale,
+            )
 
-        super_resolve_dtm(
-            raw_dem,
-            reference_tif,
-            cached_dtm,
-            band=cfg.dtm.band,
-            radius=cfg.dtm.radius,
-            eps=cfg.dtm.eps,
-            apply_erosion=cfg.dtm.apply_erosion,
-            erosion_kwargs=cfg.dtm.erosion_kwargs or None,
-        )
+        if cfg.dtm.mode is DtmMode.native:
+            # DEM is master: no guided upsampling onto the optical grid, so
+            # real elevation resolution is preserved rather than invented.
+            if cfg.dtm.apply_erosion:
+                simulate_thermal_erosion(
+                    raw_dem, cached_dtm, **(cfg.dtm.erosion_kwargs or {})
+                )
+            else:
+                shutil.copy2(raw_dem, cached_dtm)
+        else:
+            super_resolve_dtm(
+                raw_dem,
+                reference_tif,
+                cached_dtm,
+                band=cfg.dtm.band,
+                radius=cfg.dtm.radius,
+                eps=cfg.dtm.eps,
+                apply_erosion=cfg.dtm.apply_erosion,
+                erosion_kwargs=cfg.dtm.erosion_kwargs or None,
+            )
 
+        # In guided_upsample mode cached_dtm is already on the optical grid,
+        # so this is effectively an identity; in native mode it does the
+        # real work of aligning the optical raster onto the DEM's grid.
         align_raster_grid(
             cached_dtm,
             reference_tif,

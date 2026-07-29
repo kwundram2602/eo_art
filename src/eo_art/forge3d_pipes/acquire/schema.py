@@ -12,6 +12,18 @@ class DemSource(Enum):
     copernicus = "copernicus"
     fabdem = "fabdem"
     srtm = "srtm"
+    local = "local"
+
+
+class DtmMode(Enum):
+    # Optical is master: super_resolve_dtm warps the DEM onto the optical
+    # grid. Correct when the DEM is coarser than the imagery (the 30 m
+    # Earth Engine sources), but wastes real resolution on a high-res local
+    # DEM by downsampling it to match the optical grid.
+    guided_upsample = "guided_upsample"
+    # DEM is master: the optical raster is aligned onto the DEM's own grid
+    # instead, so a high-res local DEM keeps its real elevation resolution.
+    native = "native"
 
 
 @dataclass
@@ -52,8 +64,23 @@ class Sentinel:
 
 @dataclass
 class Dem:
-    source: DemSource = DemSource.copernicus
+    # FABDEM is Copernicus GLO-30 with forest canopy and buildings removed --
+    # same 30 m posting, but no tree-height noise stippling the surface.
+    source: DemSource = DemSource.fabdem
     scale: float = 30.0
+    # Local GeoTIFF path, required when source is DemSource.local (e.g. a
+    # downloaded 1 m national LiDAR DGM); meaningless otherwise.
+    path: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.source is DemSource.local:
+            if self.path is None:
+                raise ValueError("dem.path is required when dem.source is 'local'")
+        elif self.path is not None:
+            raise ValueError(
+                f"dem.path is only valid when dem.source is 'local', got "
+                f"source={self.source.value!r} with path={self.path!r}"
+            )
 
 
 @dataclass
@@ -63,6 +90,7 @@ class Dtm:
     radius: int = 8
     eps: float = 1e-2
     band: int | None = None
+    mode: DtmMode = DtmMode.guided_upsample
 
 
 @dataclass
@@ -73,7 +101,10 @@ class Align:
 @dataclass
 class AcquireConfig:
     aoi_path: str = MISSING
-    ee_project: str = MISSING
+    # Only required for Earth Engine DEM sources -- the Sentinel-2 side runs
+    # through STAC/Planetary Computer, not Earth Engine, and dem.source=local
+    # reads a DEM straight off disk, so neither needs a project at all.
+    ee_project: str | None = None
     # Where dtm.tif/optical_aligned.tif land (plus the internal _acquire
     # cache). Overridden by --out on the CLI when given.
     out_dir: str = "out"
@@ -86,3 +117,10 @@ class AcquireConfig:
     dem: Dem = field(default_factory=Dem)
     dtm: Dtm = field(default_factory=Dtm)
     align: Align = field(default_factory=Align)
+
+    def __post_init__(self) -> None:
+        if self.dem.source is not DemSource.local and self.ee_project is None:
+            raise ValueError(
+                f"ee_project is required when dem.source={self.dem.source.value!r} "
+                "(only dem.source=local can skip Earth Engine)"
+            )

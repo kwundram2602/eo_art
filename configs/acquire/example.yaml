@@ -19,7 +19,9 @@ sentinel:
   max_cloud_cover: 20
 
 dem:
-  source: copernicus
+  # FABDEM is Copernicus GLO-30 with forest canopy and buildings removed --
+  # same 30 m posting, but no tree-height noise stippling the surface.
+  source: fabdem
   scale: 30
 
 dtm:

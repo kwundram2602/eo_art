@@ -47,10 +47,22 @@ def _wire(monkeypatch, tmp_path, *, scenes=(("scene0.tif", None),)):
         dem_path.write_bytes(b"dem")
         return dem_path
 
+    def _fetch_local_dem(reference_tif, out_dir, *, path):
+        calls.append(("fetch_local_dem", reference_tif, out_dir, path))
+        dem_path = tmp_path / "local_dem.tif"
+        dem_path.write_bytes(b"localdem")
+        return dem_path
+
     def _super_resolve_dtm(dem, optical, out, **kwargs):
         calls.append(("super_resolve_dtm", dem, optical, out, kwargs))
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"dtm")
+        return out
+
+    def _simulate_thermal_erosion(dem, out, **kwargs):
+        calls.append(("simulate_thermal_erosion", dem, out, kwargs))
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"eroded")
         return out
 
     def _align_raster_grid(reference, target, out, *, resampling):
@@ -62,7 +74,9 @@ def _wire(monkeypatch, tmp_path, *, scenes=(("scene0.tif", None),)):
     monkeypatch.setattr(pipeline, "read_aoi_center", _read_aoi_center)
     monkeypatch.setattr(pipeline, "run_sentinel_sr", _run_sentinel_sr)
     monkeypatch.setattr(pipeline, "fetch_terrain_dem", _fetch_terrain_dem)
+    monkeypatch.setattr(pipeline, "fetch_local_dem", _fetch_local_dem)
     monkeypatch.setattr(pipeline, "super_resolve_dtm", _super_resolve_dtm)
+    monkeypatch.setattr(pipeline, "simulate_thermal_erosion", _simulate_thermal_erosion)
     monkeypatch.setattr(pipeline, "align_raster_grid", _align_raster_grid)
     return calls
 
@@ -214,3 +228,127 @@ def test_out_dir_is_not_part_of_the_cache_key(monkeypatch, tmp_path):
     cfg_a = _cfg(out_dir="out_a")
     cfg_b = _cfg(out_dir="out_b")
     assert pipeline._cache_key(cfg_a) == pipeline._cache_key(cfg_b)
+
+
+def test_dtm_mode_is_part_of_the_cache_key(monkeypatch, tmp_path):
+    cfg_a = _cfg(dtm={"mode": "guided_upsample"})
+    cfg_b = _cfg(dtm={"mode": "native"})
+    assert pipeline._cache_key(cfg_a) != pipeline._cache_key(cfg_b)
+
+
+def test_local_dem_source_is_part_of_the_cache_key(monkeypatch, tmp_path):
+    cfg_a = _cfg(dem={"source": "fabdem"})
+    cfg_b = _cfg(dem={"source": "local", "path": "dgm.tif"})
+    assert pipeline._cache_key(cfg_a) != pipeline._cache_key(cfg_b)
+
+
+def test_local_dem_source_calls_fetch_local_dem_not_fetch_terrain_dem(
+    monkeypatch, tmp_path
+):
+    calls = _wire(monkeypatch, tmp_path)
+    cfg = _cfg(dem={"source": "local", "path": "some_local_dgm.tif"})
+
+    pipeline.run_acquire(cfg, tmp_path / "out", use_cache=False)
+
+    names = [c[0] for c in calls]
+    assert "fetch_local_dem" in names
+    assert "fetch_terrain_dem" not in names
+    _, reference_tif, out_dir, path = next(
+        c for c in calls if c[0] == "fetch_local_dem"
+    )
+    assert reference_tif.name == "scene0.tif"
+    assert path == "some_local_dgm.tif"
+
+
+def test_native_mode_skips_super_resolve_and_aligns_onto_dem_grid(
+    monkeypatch, tmp_path
+):
+    calls = _wire(monkeypatch, tmp_path)
+    cfg = _cfg(dtm={"mode": "native"})
+
+    result = pipeline.run_acquire(cfg, tmp_path / "out", use_cache=False)
+
+    assert [c[0] for c in calls] == [
+        "read_aoi_center",
+        "run_sentinel_sr",
+        "fetch_terrain_dem",
+        "align_raster_grid",
+    ]
+    # the DTM is the raw DEM's own content, untouched by any upsampling.
+    assert result.dtm_path.read_bytes() == b"dem"
+
+    _, reference, target, optical_out, resampling = calls[-1]
+    assert reference.name == result.dtm_path.name
+    assert target.name == "scene0.tif"
+    assert optical_out.name == result.optical_path.name
+    assert resampling == "bilinear"
+
+
+def test_guided_upsample_mode_is_the_default_and_still_calls_super_resolve_dtm(
+    monkeypatch, tmp_path
+):
+    calls = _wire(monkeypatch, tmp_path)
+    cfg = _cfg()
+
+    pipeline.run_acquire(cfg, tmp_path / "out", use_cache=False)
+
+    assert [c[0] for c in calls] == [
+        "read_aoi_center",
+        "run_sentinel_sr",
+        "fetch_terrain_dem",
+        "super_resolve_dtm",
+        "align_raster_grid",
+    ]
+
+
+def test_native_mode_without_erosion_does_not_call_simulate_thermal_erosion(
+    monkeypatch, tmp_path
+):
+    calls = _wire(monkeypatch, tmp_path)
+    cfg = _cfg(dtm={"mode": "native", "apply_erosion": False})
+
+    pipeline.run_acquire(cfg, tmp_path / "out", use_cache=False)
+
+    assert "simulate_thermal_erosion" not in [c[0] for c in calls]
+
+
+def test_native_mode_with_erosion_calls_simulate_thermal_erosion(monkeypatch, tmp_path):
+    calls = _wire(monkeypatch, tmp_path)
+    cfg = _cfg(
+        dtm={
+            "mode": "native",
+            "apply_erosion": True,
+            "erosion_kwargs": {"iterations": 5},
+        }
+    )
+
+    result = pipeline.run_acquire(cfg, tmp_path / "out", use_cache=False)
+
+    names = [c[0] for c in calls]
+    assert "simulate_thermal_erosion" in names
+    assert "super_resolve_dtm" not in names
+    _, dem_in, dem_out, kwargs = next(
+        c for c in calls if c[0] == "simulate_thermal_erosion"
+    )
+    assert dem_in.name == "dem.tif"
+    assert kwargs == {"iterations": 5}
+    assert result.dtm_path.read_bytes() == b"eroded"
+
+
+def test_guided_upsample_mode_with_erosion_still_chains_through_super_resolve_dtm(
+    monkeypatch, tmp_path
+):
+    """Regression guard: erosion in guided_upsample mode is forwarded into
+    super_resolve_dtm exactly as before, not routed through the native-mode
+    simulate_thermal_erosion call."""
+    calls = _wire(monkeypatch, tmp_path)
+    cfg = _cfg(dtm={"apply_erosion": True, "erosion_kwargs": {"iterations": 3}})
+
+    pipeline.run_acquire(cfg, tmp_path / "out", use_cache=False)
+
+    names = [c[0] for c in calls]
+    assert "super_resolve_dtm" in names
+    assert "simulate_thermal_erosion" not in names
+    _, _, _, _, kwargs = next(c for c in calls if c[0] == "super_resolve_dtm")
+    assert kwargs["apply_erosion"] is True
+    assert kwargs["erosion_kwargs"] == {"iterations": 3}
