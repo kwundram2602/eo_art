@@ -1,7 +1,8 @@
+import pytest
 from omegaconf import OmegaConf
 
 from eo_art.forge3d_pipes.acquire import pipeline
-from eo_art.forge3d_pipes.acquire.schema import AcquireConfig
+from eo_art.forge3d_pipes.acquire.schema import AcquireConfig, SrConfig
 from eo_art.forge3d_pipes.acquire.sentinel_bridge import Scene
 
 
@@ -352,3 +353,52 @@ def test_guided_upsample_mode_with_erosion_still_chains_through_super_resolve_dt
     _, _, _, _, kwargs = next(c for c in calls if c[0] == "super_resolve_dtm")
     assert kwargs["apply_erosion"] is True
     assert kwargs["erosion_kwargs"] == {"iterations": 3}
+
+
+def _sr_cfg(**overrides):
+    base = OmegaConf.merge(
+        OmegaConf.structured(SrConfig),
+        {
+            "aoi_path": "aoi.gpkg",
+            "sentinel_sr_dir": "../sentinel_sr",
+            "sentinel": {
+                "start_date": "2023-01-01",
+                "end_date": "2023-12-31",
+                "model_path": "/models/LDSRS2-SEN2SR",
+            },
+        },
+        overrides,
+    )
+    return OmegaConf.to_object(base)
+
+
+def test_run_sr_copies_lowest_cloud_scene_without_dem(monkeypatch, tmp_path):
+    calls = _wire(
+        monkeypatch,
+        tmp_path,
+        scenes=(("cloudy.tif", 40.0), ("clear.tif", 2.0)),
+    )
+    result = pipeline.run_sr(_sr_cfg(), tmp_path / "out", use_cache=False)
+
+    assert [c[0] for c in calls] == ["read_aoi_center", "run_sentinel_sr"]
+    assert result == tmp_path / "out" / "optical_sr.tif"
+    assert result.read_bytes() == b"scene"
+
+
+def test_run_sr_cache_hit_skips_sentinel(monkeypatch, tmp_path):
+    calls = _wire(monkeypatch, tmp_path)
+    cfg = _sr_cfg()
+    pipeline.run_sr(cfg, tmp_path / "out")
+    calls.clear()
+
+    result = pipeline.run_sr(cfg, tmp_path / "out")
+
+    assert calls == []
+    assert result.exists()
+
+
+def test_run_sr_no_scenes_written_raises(monkeypatch, tmp_path):
+    _wire(monkeypatch, tmp_path, scenes=())
+
+    with pytest.raises(RuntimeError, match="no scenes"):
+        pipeline.run_sr(_sr_cfg(), tmp_path / "out", use_cache=False)

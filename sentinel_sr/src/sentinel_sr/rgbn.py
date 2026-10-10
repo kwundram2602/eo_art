@@ -70,6 +70,102 @@ def _patch_vae_attention_for_low_vram() -> None:
     AttnBlock.forward = forward
 
 
+def _patch_swin_for_low_vram(chunk: int = 512) -> None:
+    """Chunk Swin2SR's per-window and per-token work (sen2sr) over its batch axis.
+
+    LDSRS2-SEN2SR's two Swin2SR stages run on the whole 512x512 SR image at
+    once, so a 128px input gives B_ = 4096 windows / L = 262144 tokens and
+    every one of the 64 blocks materializes three tensors far too large for a
+    4 GB GPU: the [B_, heads, N, N] attention scores (512 MiB), the [B_, N, 3C]
+    qkv projection (360 MiB), and the block MLP's [B, L, 4C] hidden state
+    (480 MiB, twice -- linear then GELU).
+
+    Windows attend independently and the MLP is token-wise, so slicing the
+    batch/token axis is exact rather than approximate (verified: bit-identical
+    output against the original, masked and unmasked path alike) and caps each
+    of those tensors at a chunk's worth. Unlike an SDPA rewrite for the
+    attention half, this needs no kernel support for the model's odd head_dim
+    of 15 (embed_dim 120 / 8 heads), and it covers the qkv and MLP tensors an
+    SDPA swap would leave untouched.
+    """
+    from sen2sr.models.opensr_baseline.swin import Mlp, WindowAttention
+
+    def attention_forward(
+        self, x: torch.Tensor, mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        B_, N, C = x.shape
+        qkv_bias = None
+        if self.q_bias is not None:
+            qkv_bias = torch.cat(
+                (
+                    self.q_bias,
+                    torch.zeros_like(self.v_bias, requires_grad=False),
+                    self.v_bias,
+                )
+            )
+
+        logit_scale = torch.clamp(
+            self.logit_scale,
+            max=torch.log(torch.tensor(1.0 / 0.01)).to(self.logit_scale.device),
+        ).exp()
+
+        bias_table = self.cpb_mlp(self.relative_coords_table).view(-1, self.num_heads)
+        bias = bias_table[self.relative_position_index.view(-1)].view(
+            self.window_size[0] * self.window_size[1],
+            self.window_size[0] * self.window_size[1],
+            -1,
+        )
+        bias = 16 * torch.sigmoid(bias.permute(2, 0, 1).contiguous()).unsqueeze(0)
+
+        # The (nW, N, N) mask applies to windows cyclically over B_ = B * nW
+        # (what the original expresses as a view/broadcast over both axes), so
+        # tiling it to B_ once lets it be sliced in lockstep with the chunks.
+        mask_full = (
+            mask.repeat(B_ // mask.shape[0], 1, 1).unsqueeze(1)
+            if mask is not None
+            else None
+        )
+
+        out = torch.empty_like(x)
+        for start in range(0, B_, chunk):
+            stop = min(start + chunk, B_)
+            qkv = F.linear(input=x[start:stop], weight=self.qkv.weight, bias=qkv_bias)
+            qkv = qkv.reshape(stop - start, N, 3, self.num_heads, -1).permute(
+                2, 0, 3, 1, 4
+            )
+            q, k, v = qkv[0], qkv[1], qkv[2]
+
+            # cosine attention
+            attn = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1)
+            attn = attn * logit_scale
+            attn = attn + bias
+            if mask_full is not None:
+                attn = attn + mask_full[start:stop]
+            attn = self.softmax(attn)
+
+            out[start:stop] = (attn @ v).transpose(1, 2).reshape(stop - start, N, C)
+
+        return self.proj_drop(self.proj(out))
+
+    # The MLP is applied per token, so it chunks along the token axis. Its
+    # chunk is scaled up because a token is far smaller than a whole window.
+    token_chunk = chunk * 64
+
+    def mlp_forward(self, x: torch.Tensor) -> torch.Tensor:
+        *lead, tokens, _ = x.shape
+        flat = x.reshape(-1, x.shape[-1])
+        out = torch.empty(
+            flat.shape[0], self.fc2.out_features, dtype=x.dtype, device=x.device
+        )
+        for start in range(0, flat.shape[0], token_chunk):
+            stop = min(start + token_chunk, flat.shape[0])
+            out[start:stop] = self.fc2(self.act(self.fc1(flat[start:stop])))
+        return out.view(*lead, tokens, self.fc2.out_features)
+
+    WindowAttention.forward = attention_forward
+    Mlp.forward = mlp_forward
+
+
 def export_superres_tifs(
     lat: float,
     lon: float,
@@ -110,6 +206,7 @@ def export_superres_tifs(
     )
     epsg = da.attrs["epsg"]
     _patch_vae_attention_for_low_vram()
+    _patch_swin_for_low_vram()
     loaded_model = mlstac.load(str(model_path))
     model = loaded_model.compiled_model(device=device)
 

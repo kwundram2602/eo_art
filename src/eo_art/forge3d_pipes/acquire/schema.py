@@ -124,3 +124,17 @@ class AcquireConfig:
                 f"ee_project is required when dem.source={self.dem.source.value!r} "
                 "(only dem.source=local can skip Earth Engine)"
             )
+
+
+@dataclass
+class SrConfig:
+    """The Sentinel SR slice of `AcquireConfig`, for `eo-art-f3d sr`.
+
+    Carries no dem/dtm/ee_project, so an acquire YAML can be reused as-is for
+    an SR-only run without satisfying the Earth Engine requirement.
+    """
+
+    aoi_path: str = MISSING
+    out_dir: str = "out"
+    sentinel_sr_dir: str = MISSING
+    sentinel: Sentinel = field(default_factory=Sentinel)

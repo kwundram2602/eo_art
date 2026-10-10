@@ -86,6 +86,7 @@ def _parser() -> argparse.ArgumentParser:
     acquire_cmd.add_argument(
         "--no-cache", action="store_true", help="rerun even if cached outputs exist"
     )
+
     return parser
 
 

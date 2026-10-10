@@ -8,7 +8,12 @@ from pathlib import Path
 
 from vecraspy import align_raster_grid, simulate_thermal_erosion, super_resolve_dtm
 
-from eo_art.forge3d_pipes.acquire.schema import AcquireConfig, DemSource, DtmMode
+from eo_art.forge3d_pipes.acquire.schema import (
+    AcquireConfig,
+    DemSource,
+    DtmMode,
+    SrConfig,
+)
 from eo_art.forge3d_pipes.acquire.sentinel_bridge import (
     Scene,
     read_aoi_center,
@@ -19,6 +24,7 @@ from eo_art.forge3d_pipes.acquire.terrain import fetch_local_dem, fetch_terrain_
 CACHE_DIRNAME = "_acquire"
 DTM_FILENAME = "dtm.tif"
 OPTICAL_FILENAME = "optical_aligned.tif"
+SR_FILENAME = "optical_sr.tif"
 
 
 @dataclass(frozen=True)
@@ -27,7 +33,7 @@ class AcquireResult:
     optical_path: Path
 
 
-def _cache_key(cfg: AcquireConfig) -> str:
+def _cache_key(cfg: AcquireConfig | SrConfig) -> str:
     # out_dir says where to store results, not what to compute -- excluded so
     # moving the output location doesn't invalidate an otherwise-identical
     # cached result (or, worse, silently redo an expensive GPU+network run).
@@ -140,3 +146,35 @@ def run_acquire(
     shutil.copy2(cached_dtm, final_dtm)
     shutil.copy2(cached_optical, final_optical)
     return AcquireResult(dtm_path=final_dtm, optical_path=final_optical)
+
+
+def run_sr(cfg: SrConfig, out_dir: str | Path, use_cache: bool = True) -> Path:
+    """Run only the Sentinel SR step and return ``<out_dir>/optical_sr.tif``.
+
+    The reference scene (lowest cloud cover, or ``sentinel.reference_index``)
+    is cached under ``<out_dir>/_acquire/<hash>`` like ``run_acquire``'s
+    outputs; the full set of SR timesteps stays next to it in ``sentinel/``.
+    """
+    out_dir = Path(out_dir)
+    cache_dir = out_dir / CACHE_DIRNAME / _cache_key(cfg)
+    cached_sr = cache_dir / SR_FILENAME
+    final_sr = out_dir / SR_FILENAME
+
+    if not (use_cache and cached_sr.exists()):
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        lat, lon = read_aoi_center(cfg.aoi_path)
+        written = run_sentinel_sr(
+            cfg.sentinel, cfg.sentinel_sr_dir, lat, lon, cache_dir / "sentinel"
+        )
+        if not written:
+            raise RuntimeError(
+                f"sentinel_sr wrote no scenes for aoi={cfg.aoi_path!r} "
+                f"in [{cfg.sentinel.start_date}, {cfg.sentinel.end_date}]"
+            )
+        reference_tif = _select_reference(written, cfg.sentinel.reference_index)
+        shutil.copy2(reference_tif, cached_sr)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(cached_sr, final_sr)
+    return final_sr

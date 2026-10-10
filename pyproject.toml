@@ -41,6 +41,7 @@ install-local = "scripts.install_local:main"
 ship = "scripts.ship:main"
 add-git-ref = "scripts.add_git_ref:main"
 eo-art-f3d = "eo_art.forge3d_pipes.cli:main"
+eo-art-sr = "eo_art.sr_cli:main"
 
 [project.urls]
 Homepage = ""
