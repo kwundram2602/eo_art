@@ -1,0 +1,53 @@
+aoi_path: aoi.gpkg
+ee_project: ee-test
+out_dir: configured_out
+sentinel_sr_dir: ../sentinel_sr
+sentinel:
+  start_date: '2023-01-01'
+  end_date: '2023-12-31'
+  model_path: /models/LDSRS2-SEN2SR
+  collection: sentinel-2-l2a
+  bands:
+  - B02
+  - B03
+  - B04
+  - B05
+  - B06
+  - B07
+  - B08
+  - B8A
+  - B11
+  - B12
+  edge_size: 128
+  resolution: 10
+  stac: https://planetarycomputer.microsoft.com/api/stac/v1
+  max_items: null
+  max_cloud_cover: null
+  max_aoi_cloud: 10.0
+  scl_cloud_classes:
+  - 8
+  - 9
+  reference_index: null
+  timeseries:
+    enabled: false
+    interval: month
+    every: 1
+    fill_gaps: false
+    max_zone_offset_days: null
+  zones:
+    enabled: false
+    clip_to_aoi: true
+    mosaic: false
+dem:
+  source: fabdem
+  scale: 30.0
+  path: null
+dtm:
+  apply_erosion: false
+  erosion_kwargs: {}
+  radius: 8
+  eps: 0.01
+  band: null
+  mode: guided_upsample
+align:
+  resampling: bilinear

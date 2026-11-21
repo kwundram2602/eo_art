@@ -768,3 +768,75 @@ def test_rgb_stretch_rejects_out_of_range_band_index(tmp_path):
         ops.rgb_stretch(
             src, tmp_path / "out.tif", ops.RgbStretchCfg()
         )  # default needs band 3
+
+
+def test_rgb_stretch_fixed_bounds_override_percentiles(tmp_path):
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from eo_art.forge3d_pipes.prep.ops import RgbStretchCfg, rgb_stretch
+
+    src = tmp_path / "src.tif"
+    data = np.stack([np.linspace(0, 1, 16, dtype="float32").reshape(4, 4)] * 3)
+    with rasterio.open(
+        src,
+        "w",
+        driver="GTiff",
+        width=4,
+        height=4,
+        count=3,
+        dtype="float32",
+        crs="EPSG:32632",
+        transform=from_origin(0, 40, 10, 10),
+    ) as dst:
+        dst.write(data)
+
+    out = rgb_stretch(
+        src, tmp_path / "out.tif", RgbStretchCfg(lower_value=0.0, upper_value=2.0)
+    )
+
+    with rasterio.open(out) as result:
+        band = result.read(1)
+    # 1.0 is half of [0, 2], not the top of a percentile stretch.
+    assert band.max() == 127
+
+
+def test_rgb_stretch_needs_both_fixed_bounds(tmp_path):
+    from eo_art.forge3d_pipes.prep.ops import RgbStretchCfg, rgb_stretch
+
+    with pytest.raises(ValueError, match="both lower_value and upper_value"):
+        rgb_stretch(
+            tmp_path / "x.tif", tmp_path / "y.tif", RgbStretchCfg(lower_value=0.1)
+        )
+
+
+def test_stretch_bounds_over_pools_all_rasters(tmp_path):
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from eo_art.forge3d_pipes.prep.ops import RgbStretchCfg, stretch_bounds_over
+
+    paths = []
+    for i, value in enumerate((0.0, 1.0)):
+        path = tmp_path / f"t{i}.tif"
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            width=4,
+            height=4,
+            count=3,
+            dtype="float32",
+            crs="EPSG:32632",
+            transform=from_origin(0, 40, 10, 10),
+        ) as dst:
+            dst.write(np.full((3, 4, 4), value, "float32"))
+        paths.append(path)
+
+    lo, hi = stretch_bounds_over(
+        paths, RgbStretchCfg(lower_percentile=0, upper_percentile=100)
+    )
+
+    assert (lo, hi) == (0.0, 1.0)

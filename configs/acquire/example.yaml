@@ -1,4 +1,6 @@
-# Fetches terrain + optical inputs for a render. Run standalone with
+# Fetches terrain + optical inputs for a render; each run writes into its own
+# folder out/runs/<time>-acquire/ (cache shared in out/_acquire/), and
+# out/runs/latest-acquire points at the newest. Run standalone with
 # `eo-art-f3d acquire configs/acquire/example.yaml`, or chained ahead of a
 # render with `eo-art-f3d run <render-config> --acquire
 # configs/acquire/example.yaml`. --out overrides out_dir below either way.
@@ -17,6 +19,23 @@ sentinel:
   model_path: /path/to/LDSRS2-SEN2SR
   max_items: 10
   max_cloud_cover: 20
+  # Large AOIs: without zones only one edge_size x resolution chip (1.28 km)
+  # around the AOI's center is super-resolved. Zones cover the whole AOI with
+  # such chips, run one after another (max_items applies per zone), and write
+  # <aoi>_sr_zones/ (tiles + VRT) into the run folder out/runs/<time>-<kind>/. Acquire then builds the DTM natively over
+  # all zones (dtm.mode is ignored); `run --acquire` adds one overlay per tile,
+  # aligned to the DTM at render time.
+  # zones:
+  #   enabled: true
+  #   clip_to_aoi: true   # skip grid cells outside an irregular AOI
+  #   mosaic: false       # also write <aoi>_sr_mosaic.tif
+  # Zones + timeseries: one shared step per interval, the zones' dates at most
+  # max_zone_offset_days apart where possible (steps.json reports the actual
+  # spread); with zones.mosaic each step is also written as one GeoTIFF.
+  # timeseries:
+  #   enabled: true
+  #   interval: month
+  #   max_zone_offset_days: 14
 
 dem:
   # FABDEM is Copernicus GLO-30 with forest canopy and buildings removed --

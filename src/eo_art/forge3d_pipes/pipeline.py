@@ -115,16 +115,14 @@ def _align_overlay_to_dem(
     return aligned, aligned_mask
 
 
-def _run_variant(
-    cfg: PipelineConfig,
-    merged: DictConfig,
-    out_dir: Path,
-    cache_dir: Path,
-    use_cache: bool,
-) -> RenderResult:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    write_resolved_config(merged, out_dir / RESOLVED_CONFIG_NAME)
+def prepare_scene(
+    cfg: PipelineConfig, cache_dir: Path, use_cache: bool
+) -> tuple[Path, list[ResolvedOverlay]]:
+    """Run the DEM's and every overlay's prep chain: the prepared DEM and the
+    overlays exactly as the renderer receives them (PNG + UV extent).
 
+    Needs no GPU, so the app uses it to preview overlays before a run.
+    """
     prepared = run_prep_chain(
         Path(cfg.input.path), cfg.prepare, cache_dir, use_cache=use_cache
     )
@@ -171,8 +169,20 @@ def _run_variant(
                 z_order=overlay.z_order,
             )
         )
+    return prepared, resolved_overlays
 
-    return render(cfg, prepared, out_dir, overlays=resolved_overlays)
+
+def _run_variant(
+    cfg: PipelineConfig,
+    merged: DictConfig,
+    out_dir: Path,
+    cache_dir: Path,
+    use_cache: bool,
+) -> RenderResult:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    write_resolved_config(merged, out_dir / RESOLVED_CONFIG_NAME)
+    prepared, overlays = prepare_scene(cfg, cache_dir, use_cache)
+    return render(cfg, prepared, out_dir, overlays=overlays)
 
 
 def run(

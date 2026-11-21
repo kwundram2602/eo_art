@@ -1,1 +1,1 @@
-"""Streamlit pages; the only part of ``eo_art.app`` that imports streamlit."""
+"""Flet front end over the eo-art pipelines."""

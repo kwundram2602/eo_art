@@ -1,7 +1,7 @@
 """Build and launch the existing pipeline CLIs as subprocesses.
 
-The app never calls the pipelines in-process: a run must survive Streamlit
-reruns, be stoppable, and keep the forge3d viewer out of the server process.
+The app never calls the pipelines in-process: a run must outlive the page that
+started it, be stoppable, and keep the forge3d viewer out of the UI process.
 """
 
 import os
@@ -22,6 +22,24 @@ class PipelineKind(Enum):
     render = "Render"
     acquire_render = "Acquire → Render"
 
+
+# Which runs belong to which stage of the app.
+ACQUIRE_KINDS = (PipelineKind.acquire, PipelineKind.sr)
+FORGE3D_KINDS = (PipelineKind.render, PipelineKind.acquire_render)
+
+DESCRIPTIONS = {
+    PipelineKind.acquire: "Sentinel SR → DEM → DTM → align. Writes dtm.tif and "
+    "optical_aligned.tif (with sentinel.zones: one tile per zone) into its own "
+    "run folder out/runs/<time>-acquire/; out/runs/latest-acquire points at "
+    "the newest one.",
+    PipelineKind.sr: "Only the Sentinel-2 super-resolution, into its own run "
+    "folder out/runs/<time>-sr/: <aoi-name>_sr.tif, or with "
+    "sentinel.timeseries.enabled one GeoTIFF per interval in "
+    "<aoi-name>_sr_timeseries/.",
+    PipelineKind.render: "forge3d render of the merged render config(s).",
+    PipelineKind.acquire_render: "Acquire first, then render with its DTM as "
+    "input.path and its optical raster as the overlay's path.",
+}
 
 F3D_SCRIPT = "eo-art-f3d"
 SR_SCRIPT = "eo-art-sr"
@@ -51,20 +69,27 @@ def _script(bin_dir: Path, name: str) -> str:
     return str(bin_dir / name)
 
 
-def build_command(spec: PipelineSpec, bin_dir: Path | None = None) -> list[str]:
-    """The exact CLI invocation for ``spec``; flags mirror the CLIs 1:1."""
+def build_command(
+    spec: PipelineSpec, bin_dir: Path | None = None, run_id: str | None = None
+) -> list[str]:
+    """The exact CLI invocation for ``spec``; flags mirror the CLIs 1:1.
+
+    ``run_id`` names the acquire/SR run folder (``out/runs/<run_id>/``); the
+    app passes its log's name, so a run's folder and log share one id.
+    """
     bin_dir = Path(sys.executable).parent if bin_dir is None else bin_dir
     sets = [arg for override in spec.overrides for arg in ("--set", override)]
+    run_flag = ["--run-id", run_id] if run_id else []
 
     if spec.kind is PipelineKind.sr:
         assert spec.acquire_config is not None
         cmd = [_script(bin_dir, SR_SCRIPT), spec.acquire_config, *sets]
-        return cmd + (["--no-cache"] if spec.no_cache else [])
+        return cmd + (["--no-cache"] if spec.no_cache else []) + run_flag
 
     if spec.kind is PipelineKind.acquire:
         assert spec.acquire_config is not None
         cmd = [_script(bin_dir, F3D_SCRIPT), "acquire", spec.acquire_config]
-        return cmd + (["--no-cache"] if spec.no_cache else [])
+        return cmd + (["--no-cache"] if spec.no_cache else []) + run_flag
 
     cmd = [_script(bin_dir, F3D_SCRIPT), "run", *spec.render_layers, *sets]
     if spec.sweep:
@@ -80,6 +105,8 @@ def build_command(spec: PipelineSpec, bin_dir: Path | None = None) -> list[str]:
             cmd += ["--acquire-overlay", spec.acquire_overlay]
         if spec.no_cache:
             cmd.append("--acquire-no-cache")
+        if run_id:
+            cmd += ["--acquire-run-id", run_id]
     return cmd
 
 
@@ -102,6 +129,13 @@ class RunHandle:
 def log_path_for(logs_dir: Path, kind: PipelineKind) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return logs_dir / f"{stamp}-{kind.name}.log"
+
+
+def log_kind(path: Path) -> PipelineKind | None:
+    """The run kind a log was written for (see ``log_path_for``)."""
+    # <YYYYmmdd>-<HHMMSS>-<kind name>
+    parts = path.stem.split("-", 2)
+    return PipelineKind.__members__.get(parts[2]) if len(parts) == 3 else None
 
 
 def start(command: list[str], cwd: Path, log_path: Path) -> RunHandle:

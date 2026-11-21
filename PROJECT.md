@@ -1,9 +1,30 @@
 # eo_art
 
 ## Offen
-- [ ] Commit the uncommitted SR timeseries + Streamlit app work on `feat/render-quality`
+- [ ] Commit the Flet app on `feat/flet-app`
+- [ ] Run a real acquire and a forge3d render through the new Run tabs
+- [ ] dk_sk `render.yaml`: point `input.path`/overlay at `out/runs/latest-acquire/` after the next acquire
+- [ ] Real SR run with `sentinel.zones` on a 2×2 AOI: check the VRT and how forge3d handles many tile overlays
 
 ## Journal
+### 2026-11-21
+- Acquire/SR results per run: `out/runs/<time>-<kind>/` with `config.yaml`, cache stays shared in `out/_acquire/`, `out/runs/latest-acquire|latest-sr` symlinks for render configs; app passes its log name as run id, Results grouped per run (`acquire/runs.py`, `results.result_groups`)
+- Zoned SR timeseries now shares one step per interval: candidates of all zones first (`--candidates-only`), dates chosen together within `timeseries.max_zone_offset_days`, zones without a scene in the window relaxed to the nearest one with the offset reported (`zone_steps.py`, `steps.json`); VRT and optional mosaic per step; `max_items` stays ignored for timeseries
+- Copy project added: new project from another's top-level configs and AOIs, out/ stays behind (`projects.copy_project`, Projects page)
+- SR/acquire for large AOIs: `sentinel.zones` cuts the AOI into a grid of 128 px chips, one sentinel_sr run per zone, `max_items` per zone, resumable zone by zone (`acquire/zones.py`, `run_sr_zones`, `run_sr_timeseries_zones`)
+- Acquire with zones fetches one DEM over all zones and aligns nothing (DTM always native, `dtm.mode` ignored so the shared acquire/SR config stays valid); tiles reach forge3d as one overlay each, aligned at render time via `align_to_dem`, with an `rgb_stretch` shared across the tiles (`lower_value`/`upper_value`)
+- Zone tiles + VRT in `out/<aoi>_sr_zones/`, mosaic as COG on request (`zones.mosaic`, `eo-art-sr --mosaic-only`, Export button in Results); AOI map shows the zone grid
+- Overlays moved into the Overlay view (editor + own Save next to the preview, which rebuilds on save); Configs tabs now Form · Overlay · YAML · Resolved, Form keeps an overlay summary in second place and DEM prepare
+- Overlays and prepare chains editable in the render form (add/remove/reorder overlays and ops, op params generated from the registry schemas, tuple fields for `bands`/`extent`) (`components/list_editors.py`, `components/fields.py`, `config_forms.clean_lists`/`check_lists`)
+- Optical overlay rendered with red and blue swapped (no `prepare`, so B02,B03,B04 went in as R,G,B); starter render config and dk_sk now `rgb_stretch bands: [3, 2, 1]`
+- Overlay preview added as 4th view in Forge3D › Configs: renderer's PNG plus overlay on a DEM hillshade, no GPU, same prep cache (`app/overlay_preview.py`, `pipeline.prepare_scene`)
+- Orbit video ignored `render.camera` and flew at the `orbit.radius_start` default of 26000 m; unset `orbit.*_start` now come from `render.camera`, unset `phi_end` = start + 360 (`render/animation.py`)
+- SR timeseries, acquire timeseries mode and Streamlit app committed on `feat/render-quality`
+- Streamlit replaced by Flet: NavigationRail over Projects · AOI · Acquire · Forge3D, one tab per step and route (`src/eo_art/app/ui/`) — uncommitted, on `feat/flet-app`
+- Acquire and SR kept as one stage sharing one acquire config; SR is its own section in the config form
+- AOI drawing moved from folium to flet-map clicks (rectangle / polygon) — flet-webview has no Linux desktop support
+- UI-free helpers split out for tests (`app/results.py`, `composite.build_gif`/`histogram_png`, `aoi.rectangle_feature`, `config_forms.save_edits`)
+- Config form regrouped: every subgroup collapsible, `enabled` as switch in the group header, field/set/unsaved badges, pinned save bar with expand/collapse all (`config_forms.group_tree`, `components/config_editor.py`) — render form opens as 5 collapsed-ish sections instead of one 66-field block
 ### 2026-10-10
 - SR timeseries added: one scene per day/week/month/year, AOI-level SCL cloud check, duplicate overflights collapsed (`sentinel_sr/{timeseries,clouds,scenes}.py`) — uncommitted
 - Cross-UTM-zone tiles dropped before SR — nearest-neighbour reprojection caused staircase seams that SR sharpened into blocks

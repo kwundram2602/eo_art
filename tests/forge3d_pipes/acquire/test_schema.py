@@ -112,3 +112,29 @@ def test_max_aoi_cloud_is_a_percentage():
     required["sentinel"]["max_aoi_cloud"] = 120
     with pytest.raises(ValueError, match="max_aoi_cloud"):
         OmegaConf.to_object(OmegaConf.merge(_base(), required))
+
+
+def test_zones_are_off_by_default():
+    cfg = OmegaConf.to_object(OmegaConf.merge(_base(), _required()))
+    assert cfg.sentinel.zones.enabled is False
+    assert cfg.sentinel.zones.clip_to_aoi is True
+    assert cfg.sentinel.zones.mosaic is False
+
+
+def test_zones_accept_any_dtm_mode():
+    # The acquire config is shared with eo-art-sr, so zones must not make a
+    # config with the default dtm.mode invalid; acquire ignores the mode.
+    raw = OmegaConf.merge(
+        _base(), _required(), {"sentinel": {"zones": {"enabled": True}}}
+    )
+    assert OmegaConf.to_object(raw).sentinel.zones.enabled is True
+
+
+def test_negative_zone_offset_is_rejected():
+    raw = OmegaConf.merge(
+        _base(),
+        _required(),
+        {"sentinel": {"timeseries": {"max_zone_offset_days": -1}}},
+    )
+    with pytest.raises(ValueError, match="max_zone_offset_days"):
+        OmegaConf.to_object(raw)

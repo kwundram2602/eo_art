@@ -125,3 +125,26 @@ def test_stop_terminates_running_process(tmp_path):
 
 def test_tail_of_missing_file_is_empty(tmp_path):
     assert tail(tmp_path / "nope.log") == ""
+
+
+def test_log_kind_roundtrips_log_path_for(tmp_path):
+    from eo_art.app.runner import log_kind, log_path_for
+
+    for kind in PipelineKind:
+        assert log_kind(log_path_for(tmp_path, kind)) is kind
+    assert log_kind(tmp_path / "notes.log") is None
+    assert log_kind(tmp_path / "20260101-100000-bogus.log") is None
+
+
+def test_run_id_names_the_acquire_and_sr_run_folder():
+    acquire = PipelineSpec(PipelineKind.acquire, acquire_config="a.yaml")
+    sr = PipelineSpec(PipelineKind.sr, acquire_config="a.yaml")
+    both = PipelineSpec(
+        PipelineKind.acquire_render, acquire_config="a.yaml", render_layers=["r.yaml"]
+    )
+    render = PipelineSpec(PipelineKind.render, render_layers=["r.yaml"])
+
+    assert build_command(acquire, BIN, run_id="X")[-2:] == ["--run-id", "X"]
+    assert build_command(sr, BIN, run_id="X")[-2:] == ["--run-id", "X"]
+    assert build_command(both, BIN, run_id="X")[-2:] == ["--acquire-run-id", "X"]
+    assert "X" not in build_command(render, BIN, run_id="X")

@@ -6,10 +6,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from sentinel_sr.clouds import DEFAULT_CLOUD_CLASSES
-from sentinel_sr.rgbn import BANDS_10, export_superres_tifs
+from sentinel_sr.rgbn import BANDS_10, export_superres_tifs, list_candidates
 from sentinel_sr.timeseries import FREQUENCIES
 
 MANIFEST_NAME = "manifest.json"
+CANDIDATES_NAME = "candidates.json"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -59,6 +60,18 @@ def _parser() -> argparse.ArgumentParser:
         "are already done and get no scene",
     )
     parser.add_argument(
+        "--dates",
+        default="",
+        help="comma-separated YYYY-MM-DD acquisition dates to super-resolve, "
+        "chosen upstream (no interval selection, no SCL filter)",
+    )
+    parser.add_argument(
+        "--candidates-only",
+        action="store_true",
+        help=f"write {CANDIDATES_NAME} with every scene that passes the cloud "
+        "checks (and its interval), without running SR",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="redo scenes whose GeoTIFF already exists instead of keeping them",
@@ -66,8 +79,55 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _split(value: str) -> list[str]:
+    return [v for v in value.split(",") if v]
+
+
+def _write_candidates(args: argparse.Namespace) -> int:
+    result = list_candidates(
+        lat=args.lat,
+        lon=args.lon,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        collection=args.collection,
+        bands=tuple(args.bands.split(",")),
+        edge_size=args.edge_size,
+        resolution=args.resolution,
+        stac=args.stac,
+        max_cloud_cover=args.max_cloud_cover,
+        interval=args.interval,
+        every=args.every,
+        max_aoi_cloud=args.max_aoi_cloud,
+        scl_classes=tuple(int(c) for c in args.scl_classes.split(",")),
+    )
+    path = Path(args.out) / CANDIDATES_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "scenes": [
+                    {
+                        "id": c.id,
+                        "datetime": c.datetime,
+                        "cloud_cover": c.cloud_cover,
+                        "aoi_cloud": c.aoi_cloud,
+                        "bin": c.bin,
+                    }
+                    for c in result.scenes
+                ],
+                "bins": result.bins,
+            },
+            indent=2,
+        )
+    )
+    print(f"Wrote {path} ({len(result.scenes)} candidate(s))")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.candidates_only:
+        return _write_candidates(args)
 
     result = export_superres_tifs(
         lat=args.lat,
@@ -88,7 +148,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         overwrite=args.overwrite,
         max_aoi_cloud=args.max_aoi_cloud,
         scl_classes=tuple(int(c) for c in args.scl_classes.split(",")),
-        skip_dates=[d for d in args.skip_dates.split(",") if d],
+        skip_dates=_split(args.skip_dates),
+        dates=_split(args.dates),
     )
 
     manifest_path = Path(args.out) / MANIFEST_NAME

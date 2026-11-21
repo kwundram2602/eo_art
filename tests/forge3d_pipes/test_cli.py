@@ -103,9 +103,10 @@ def test_summary_is_printed(monkeypatch, cfg_path, tmp_path, capsys):
 
 
 class _FakeAcquireResult:
-    def __init__(self, dtm_path, optical_path):
+    def __init__(self, dtm_path, optical_path, zones=None):
         self.dtm_path = dtm_path
         self.optical_path = optical_path
+        self.zones = zones
 
 
 @pytest.fixture
@@ -114,9 +115,12 @@ def fake_acquire_stage(monkeypatch, tmp_path):
     dtm_path = tmp_path / "dtm.tif"
     optical_path = tmp_path / "optical_aligned.tif"
 
-    def _stage(acquire_config, out_dir, use_cache):
+    def _stage(acquire_config, out_dir, use_cache, run_id=None):
         calls.update(
-            acquire_config=acquire_config, out_dir=out_dir, use_cache=use_cache
+            acquire_config=acquire_config,
+            out_dir=out_dir,
+            use_cache=use_cache,
+            run_id=run_id,
         )
         return _FakeAcquireResult(dtm_path, optical_path)
 
@@ -294,14 +298,16 @@ def test_run_acquire_stage_falls_back_to_configs_own_out_dir(monkeypatch, tmp_pa
 
     seen = {}
 
-    def _fake_run_acquire(cfg, out_dir, use_cache=True):
+    def _fake_run_acquire(cfg, out_dir, use_cache=True, run_dir=None):
         seen["out_dir"] = out_dir
+        seen["run_dir"] = run_dir
         return acquire_pkg.AcquireResult(
             dtm_path=Path(out_dir) / "dtm.tif",
             optical_path=Path(out_dir) / "optical_aligned.tif",
         )
 
     monkeypatch.setattr(acquire_pkg, "run_acquire", _fake_run_acquire)
+    monkeypatch.chdir(tmp_path)
 
     acquire_cfg = tmp_path / "acquire.yaml"
     acquire_cfg.write_text(
@@ -323,14 +329,21 @@ def test_run_acquire_stage_falls_back_to_configs_own_out_dir(monkeypatch, tmp_pa
     cli._run_acquire_stage(str(acquire_cfg), None, True)
     assert seen["out_dir"] == "configured_out"
 
-    cli._run_acquire_stage(str(acquire_cfg), "cli_override", True)
+    cli._run_acquire_stage(str(acquire_cfg), "cli_override", True, run_id="r1")
     assert seen["out_dir"] == "cli_override"
+    # Results go to a run folder under the out dir, which then is the latest.
+    assert seen["run_dir"] == Path("cli_override") / "runs" / "r1"
+    assert (tmp_path / "cli_override" / "runs" / "r1" / "config.yaml").is_file()
+    assert (tmp_path / "cli_override" / "runs" / "latest-acquire").resolve() == (
+        tmp_path / "cli_override" / "runs" / "r1"
+    )
 
 
 def test_acquire_stage_notes_that_timeseries_is_ignored(monkeypatch, tmp_path, capsys):
     import eo_art.forge3d_pipes.acquire as acquire
 
-    monkeypatch.setattr(acquire, "run_acquire", lambda cfg, out_dir, use_cache: None)
+    monkeypatch.setattr(acquire, "run_acquire", lambda cfg, out, **kw: None)
+    monkeypatch.chdir(tmp_path)
     acquire_cfg = tmp_path / "acquire.yaml"
     acquire_cfg.write_text(
         "aoi_path: aoi.gpkg\n"
@@ -347,3 +360,101 @@ def test_acquire_stage_notes_that_timeseries_is_ignored(monkeypatch, tmp_path, c
     cli._run_acquire_stage(str(acquire_cfg), None, use_cache=True)
 
     assert "acquire ignores sentinel.timeseries" in capsys.readouterr().out
+
+
+def _write_tile(path, value):
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    data = np.stack([np.full((8, 8), value * (b + 1), "float32") for b in range(3)])
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=3,
+        dtype="float32",
+        crs="EPSG:32632",
+        transform=from_origin(0, 80, 10, 10),
+    ) as dst:
+        dst.write(data)
+    return path
+
+
+def _zones_stage(monkeypatch, tmp_path, tiles):
+    from eo_art.forge3d_pipes.acquire import SrZonesResult
+
+    zones = SrZonesResult(
+        out_dir=tmp_path,
+        tiles=tiles,
+        vrt=tmp_path / "valley_sr_zones.vrt",
+        mosaic=None,
+        empty_zones=[],
+    )
+    monkeypatch.setattr(
+        cli,
+        "_run_acquire_stage",
+        lambda *a, **k: _FakeAcquireResult(tmp_path / "dtm.tif", None, zones),
+    )
+
+
+def _render_cfg(tmp_path, overlays):
+    path = tmp_path / "render.yaml"
+    path.write_text(
+        yaml.safe_dump({"input": {"path": "dem.tif"}, "overlays": overlays})
+    )
+    acquire_cfg = tmp_path / "acquire.yaml"
+    acquire_cfg.write_text("aoi_path: aoi.gpkg\n")
+    return path, acquire_cfg
+
+
+def test_run_with_zones_adds_one_overlay_per_tile(captured_run, monkeypatch, tmp_path):
+    tiles = [
+        _write_tile(tmp_path / "valley_sr_z00_00.tif", 0.1),
+        _write_tile(tmp_path / "valley_sr_z00_01.tif", 0.3),
+    ]
+    _zones_stage(monkeypatch, tmp_path, tiles)
+    render, acquire = _render_cfg(
+        tmp_path,
+        [
+            {"name": "hillshade", "path": "hs.tif"},
+            {
+                "name": "optical",
+                "path": "placeholder.tif",
+                "opacity": 0.8,
+                "prepare": [{"op": "rgb_stretch", "bands": [3, 2, 1]}],
+            },
+        ],
+    )
+
+    cli.main(
+        ["run", str(render), "--acquire", str(acquire), "--acquire-overlay", "optical"]
+    )
+
+    merged = yaml.safe_load(Path(captured_run["configs"][0]).read_text())
+    assert [o["name"] for o in merged["overlays"]] == [
+        "hillshade",
+        "optical_z00_00",
+        "optical_z00_01",
+    ]
+    tile_overlays = merged["overlays"][1:]
+    assert [o["path"] for o in tile_overlays] == [str(t) for t in tiles]
+    assert all(o["opacity"] == 0.8 and o["align_to_dem"] for o in tile_overlays)
+    # One stretch for all tiles, pooled over both (0.1..0.9 across them).
+    stretches = [o["prepare"][0] for o in tile_overlays]
+    assert stretches[0] == stretches[1]
+    assert stretches[0]["lower_value"] < 0.2 < 0.8 < stretches[0]["upper_value"]
+
+
+def test_run_with_zones_warns_without_rgb_stretch(
+    captured_run, monkeypatch, tmp_path, capsys
+):
+    tiles = [_write_tile(tmp_path / "valley_sr_z00_00.tif", 0.1)]
+    _zones_stage(monkeypatch, tmp_path, tiles)
+    render, acquire = _render_cfg(tmp_path, [{"name": "optical", "path": "x.tif"}])
+
+    cli.main(["run", str(render), "--acquire", str(acquire)])
+
+    assert "no rgb_stretch" in capsys.readouterr().out

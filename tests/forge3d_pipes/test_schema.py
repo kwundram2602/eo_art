@@ -172,9 +172,7 @@ def test_render_overlay_preserve_colors_defaults_false():
 
 
 def test_overlay_name_and_path_are_mandatory():
-    merged = OmegaConf.merge(
-        _base(), {"input": {"path": "dem.tif"}, "overlays": [{}]}
-    )
+    merged = OmegaConf.merge(_base(), {"input": {"path": "dem.tif"}, "overlays": [{}]})
     with pytest.raises(MissingMandatoryValue):
         OmegaConf.to_object(merged)
 
@@ -237,9 +235,7 @@ def test_overlay_extent_out_of_unit_range_rejected(extent):
         OmegaConf.to_object(merged)
 
 
-@pytest.mark.parametrize(
-    "extent", [[0.5, 0.0, 0.5, 1.0], [0.0, 0.5, 1.0, 0.5]]
-)
+@pytest.mark.parametrize("extent", [[0.5, 0.0, 0.5, 1.0], [0.0, 0.5, 1.0, 0.5]])
 def test_overlay_extent_non_positive_area_rejected(extent):
     merged = OmegaConf.merge(
         _base(),

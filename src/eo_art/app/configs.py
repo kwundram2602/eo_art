@@ -10,6 +10,8 @@ from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
 
+from eo_art.app.projects import Project
+
 
 class ConfigKind(Enum):
     acquire = "acquire"
@@ -129,3 +131,50 @@ def set_top_level_value(path: Path, key: str, value: str) -> None:
     if not count:
         text = (text if not text or text.endswith("\n") else text + "\n") + line + "\n"
     path.write_text(text)
+
+
+def configs_of_kind(project: Project, kind: ConfigKind) -> list[Path]:
+    return [p for p in project.config_files() if detect_kind(p) is kind]
+
+
+@dataclass(frozen=True)
+class SrSettings:
+    """The chip/zone part of an acquire config's ``sentinel`` block."""
+
+    edge_size: int
+    resolution: int
+    zones: bool = False
+    clip_to_aoi: bool = True
+
+    @property
+    def edge_m(self) -> float:
+        return float(self.edge_size * self.resolution)
+
+
+def sr_settings(project: Project) -> SrSettings:
+    """SR chip size and ``sentinel.zones`` from the first readable acquire
+    config (else the schema defaults)."""
+    from eo_art.forge3d_pipes.acquire.schema import Sentinel, Zones
+
+    default = SrSettings(
+        Sentinel.edge_size, Sentinel.resolution, Zones.enabled, Zones.clip_to_aoi
+    )
+    for path in configs_of_kind(project, ConfigKind.acquire):
+        try:
+            sentinel = load_file(path).get("sentinel") or {}
+            zones = sentinel.get("zones") or {}
+            return SrSettings(
+                edge_size=int(sentinel.get("edge_size", default.edge_size)),
+                resolution=int(sentinel.get("resolution", default.resolution)),
+                zones=bool(zones.get("enabled", default.zones)),
+                clip_to_aoi=bool(zones.get("clip_to_aoi", default.clip_to_aoi)),
+            )
+        except Exception:
+            continue
+    return default
+
+
+def sr_edge_m(project: Project) -> float:
+    """SR chip edge in metres, from the first readable acquire config (else the
+    schema defaults): ``sentinel.edge_size`` x ``sentinel.resolution``."""
+    return sr_settings(project).edge_m

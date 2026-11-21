@@ -529,3 +529,101 @@ def indices_geotiff(raster: Raster, names: Sequence[str]) -> bytes:
                 dataset.write(compute_index(raster, name), i)
                 dataset.set_band_description(i, name)
         return memfile.read()
+
+
+def slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def frame_label(path: Path) -> str:
+    return frame_date(path) or path.stem
+
+
+def timeseries_frames(folder: Path) -> list[Path]:
+    """Dated SR steps of a timeseries folder in date order; other rasters
+    saved there (e.g. exported indices) aren't frames."""
+    return sorted(
+        (p for p in folder.glob("*.tif") if frame_date(p)),
+        key=lambda p: (frame_label(p), p.name),
+    )
+
+
+@dataclass
+class GifResult:
+    data: bytes | None
+    skipped: list[str]
+
+
+def build_gif(
+    frames: Sequence[Path],
+    names: Sequence[str],
+    stretch: Stretch,
+    cmap: str | None,
+    shape: tuple[int, int],
+    seconds: float,
+    loop: bool,
+    progress: Callable[[float, str], None] | None = None,
+) -> GifResult:
+    """GIF of ``frames`` with one composite and stretch; ``data`` is None if no
+    frame has the bands and grid (``shape``) of the current composite.
+
+    The stretch statistics are pooled over all frames: no flicker, and a darker
+    date stays darker instead of being auto-levelled on its own.
+    """
+    report = progress or (lambda fraction, text: None)
+    channels: list[list[np.ndarray]] = []
+    skipped: list[str] = []
+    for i, frame in enumerate(frames, start=1):
+        raster = load_raster(frame)
+        missing = missing_bands(raster, names)
+        if missing:
+            skipped.append(f"{frame_label(frame)} (no {', '.join(missing)})")
+        elif raster.data.shape[1:] != shape:
+            skipped.append(f"{frame_label(frame)} (grid {raster.data.shape[1:]})")
+        else:
+            # Copies, so the frame's full band stack can be freed right away.
+            channels.append([channel(raster, n).copy() for n in names])
+        report(i / len(frames) * 0.8, f"Loaded {frame_label(frame)}")
+    if not channels:
+        return GifResult(None, skipped)
+
+    reference = pooled_reference(channels)
+    report(0.85, "Rendering frames…")
+    images = [
+        to_rgb8(ch, stretch, reference)
+        if cmap is None
+        else to_colormap8(ch[0], stretch, cmap, reference)
+        for ch in channels
+    ]
+    report(0.95, "Encoding GIF…")
+    return GifResult(encode_gif(images, seconds, loop), skipped)
+
+
+def histogram_png(
+    values: np.ndarray,
+    name: str,
+    limits: tuple[float, float] | None = None,
+    size: tuple[float, float] = (3.2, 1.3),
+) -> bytes | None:
+    """Small PNG histogram of ``values`` with the stretch ``limits`` as dashed
+    lines; None if there are no valid pixels."""
+    from matplotlib.figure import Figure
+
+    valid = sample(values)
+    if valid.size == 0:
+        return None
+    fig = Figure(figsize=size, dpi=110)
+    ax = fig.add_subplot()
+    ax.hist(valid, bins=96, color="#7a8597")
+    if limits is not None:
+        for x in limits:
+            ax.axvline(x, color="#d9480f", linestyle="--", linewidth=1.2)
+    ax.set_yticks([])
+    ax.set_xlabel(name, fontsize=8)
+    ax.tick_params(axis="x", labelsize=7)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    fig.tight_layout(pad=0.3)
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", transparent=True)
+    return buffer.getvalue()

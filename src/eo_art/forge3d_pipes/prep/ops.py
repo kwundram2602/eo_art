@@ -1,5 +1,6 @@
 """Prep ops. Each takes (src, dst, cfg) and returns the written path."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -248,6 +249,37 @@ class RgbStretchCfg:
     # for deliberately false-color composites where bands aren't meant to
     # share a natural color balance.
     shared_stretch: bool = True
+    # Fixed (lo, hi) applied to all three bands instead of percentiles of
+    # this raster -- set both or neither. Lets tiles of one mosaic (SR
+    # zones) share a stretch, so neighbouring tiles don't differ in
+    # brightness; see stretch_bounds_over.
+    lower_value: float | None = None
+    upper_value: float | None = None
+
+
+def stretch_bounds_over(
+    paths: Sequence[str | Path], cfg: RgbStretchCfg, max_side: int = 256
+) -> tuple[float, float]:
+    """``rgb_stretch``'s shared (lo, hi), pooled over all of ``paths``.
+
+    Each raster is read decimated to at most ``max_side`` px per side, which
+    is plenty for percentiles and keeps many tiles cheap.
+    """
+    pooled = []
+    for path in paths:
+        with rasterio.open(path) as source:
+            scale = max(source.width, source.height) / max_side
+            shape = (
+                max(1, round(source.height / max(scale, 1))),
+                max(1, round(source.width / max(scale, 1))),
+            )
+            nodata = source.nodata
+            for band_index in cfg.bands:
+                band = source.read(band_index, out_shape=shape).astype("float64")
+                valid = band[band != nodata] if nodata is not None else band.ravel()
+                pooled.append(valid[np.isfinite(valid)])
+    values = np.concatenate(pooled) if pooled else np.empty(0)
+    return _percentile_bounds(values, cfg.lower_percentile, cfg.upper_percentile)
 
 
 @register_op("rgb_stretch", RgbStretchCfg)
@@ -271,6 +303,18 @@ def rgb_stretch(src: Path, dst: Path, cfg: RgbStretchCfg) -> Path:
             f"upper={cfg.upper_percentile}"
         )
 
+    fixed = (cfg.lower_value, cfg.upper_value)
+    if (fixed[0] is None) != (fixed[1] is None):
+        raise ValueError(
+            "rgb_stretch needs both lower_value and upper_value or neither, "
+            f"got lower_value={cfg.lower_value}, upper_value={cfg.upper_value}"
+        )
+    if fixed[0] is not None and fixed[1] is not None and fixed[0] >= fixed[1]:
+        raise ValueError(
+            "rgb_stretch.lower_value must be below upper_value, got "
+            f"{cfg.lower_value} >= {cfg.upper_value}"
+        )
+
     with rasterio.open(src) as source:
         if source.count < max(cfg.bands):
             raise ValueError(
@@ -288,7 +332,9 @@ def rgb_stretch(src: Path, dst: Path, cfg: RgbStretchCfg) -> Path:
         valid = band[band != nodata] if nodata is not None else band.ravel()
         return valid[np.isfinite(valid)]
 
-    if cfg.shared_stretch:
+    if cfg.lower_value is not None and cfg.upper_value is not None:
+        bounds = [(float(cfg.lower_value), float(cfg.upper_value))] * 3
+    elif cfg.shared_stretch:
         pooled = np.concatenate([_valid(band) for band in raw_bands])
         bounds = [
             _percentile_bounds(pooled, cfg.lower_percentile, cfg.upper_percentile)

@@ -1,3 +1,5 @@
+from omegaconf import OmegaConf
+
 from eo_art.app.configs import (
     ConfigKind,
     detect_kind,
@@ -102,3 +104,34 @@ def test_set_top_level_value_appends_missing_key(tmp_path):
     set_top_level_value(path, "aoi_path", "aoi/a.gpkg")
 
     assert path.read_text() == 'out_dir: out\naoi_path: "aoi/a.gpkg"\n'
+
+
+def test_configs_of_kind_and_sr_edge(tmp_path):
+    from eo_art.app.configs import ConfigKind, configs_of_kind, sr_edge_m
+    from eo_art.app.projects import create_project
+
+    project = create_project(tmp_path, "alps")
+    (acquire,) = configs_of_kind(project, ConfigKind.acquire)
+    (render,) = configs_of_kind(project, ConfigKind.render)
+    assert (acquire.name, render.name) == ("acquire.yaml", "render.yaml")
+
+    cfg = OmegaConf.load(acquire)
+    cfg.sentinel.edge_size, cfg.sentinel.resolution = 64, 10
+    OmegaConf.save(cfg, acquire)
+    assert sr_edge_m(project) == 640.0
+
+
+def test_sr_settings_reads_zones(tmp_path):
+    from eo_art.app.configs import ConfigKind, configs_of_kind, sr_settings
+    from eo_art.app.projects import create_project
+
+    project = create_project(tmp_path, "alps")
+    assert sr_settings(project).zones is False
+
+    (acquire,) = configs_of_kind(project, ConfigKind.acquire)
+    cfg = OmegaConf.load(acquire)
+    cfg.sentinel.zones = {"enabled": True, "clip_to_aoi": False}
+    OmegaConf.save(cfg, acquire)
+
+    settings = sr_settings(project)
+    assert (settings.zones, settings.clip_to_aoi) == (True, False)

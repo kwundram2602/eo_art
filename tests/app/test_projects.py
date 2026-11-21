@@ -5,6 +5,7 @@ from eo_art.app.projects import (
     MARKER,
     adopt_folder,
     candidate_folders,
+    copy_project,
     create_project,
     list_projects,
     validate_name,
@@ -68,3 +69,44 @@ def test_missing_projects_folder_is_created_on_first_project(tmp_path):
 
     assert project.root == projects / "alps"
     assert [p.name for p in list_projects(projects)] == ["alps"]
+
+
+def test_copy_project_copies_top_level_configs_and_aois_only(tmp_path):
+    source = create_project(tmp_path, "alps")
+    (source.configs_dir / "acquire.yaml").write_text("aoi_path: aoi/valley.gpkg\n")
+    (source.configs_dir / "look.yml").write_text("render: {}\n")
+    (source.configs_dir / "looks").mkdir()
+    (source.configs_dir / "looks" / "nested.yaml").write_text("x: 1\n")
+    (source.aoi_dir / "valley.gpkg").write_bytes(b"gpkg")
+    (source.out_dir / "dtm.tif").write_bytes(b"dtm")
+    (source.logs_dir / "run.log").write_text("log")
+
+    copy = copy_project(tmp_path, source, "alps_v2")
+
+    assert copy.root == tmp_path / "alps_v2"
+    assert (copy.root / MARKER).is_file()
+    assert copy.logs_dir.is_dir()
+    assert [p.name for p in copy.config_files()] == [
+        "acquire.yaml",
+        "look.yml",
+        RENDER_FILENAME,
+    ]
+    # Copied verbatim: relative aoi paths keep pointing into the new project.
+    assert (copy.configs_dir / "acquire.yaml").read_text() == (
+        "aoi_path: aoi/valley.gpkg\n"
+    )
+    assert not (copy.configs_dir / "looks").exists()
+    assert [p.name for p in copy.aoi_files()] == ["valley.gpkg"]
+    assert not (copy.out_dir / "dtm.tif").exists()
+    assert list(copy.logs_dir.iterdir()) == []
+    assert copy in list_projects(tmp_path)
+
+
+def test_copy_project_refuses_existing_target_and_bad_names(tmp_path):
+    source = create_project(tmp_path, "alps")
+    create_project(tmp_path, "taken")
+
+    with pytest.raises(FileExistsError):
+        copy_project(tmp_path, source, "taken")
+    with pytest.raises(ValueError):
+        copy_project(tmp_path, source, "bad name")

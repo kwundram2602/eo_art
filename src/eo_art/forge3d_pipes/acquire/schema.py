@@ -42,18 +42,51 @@ class Timeseries:
     interval: Interval = Interval.month
     # One scene every `every` intervals (e.g. interval=week, every=2: biweekly).
     every: int = 1
-    # Fill up out/<aoi>_sr_timeseries/ instead of rebuilding it: intervals that
-    # already hold a timestep there are skipped, the open ones are searched
+    # Continue the latest SR run's <aoi>_sr_timeseries/ (copied into the new
+    # run) instead of rebuilding it: intervals that already hold a timestep
+    # there are skipped, the open ones are searched
     # again on every run (e.g. after extending end_date or relaxing
     # max_aoi_cloud), and existing timesteps are never removed. Off: the folder
     # is reset to exactly this config's series.
     fill_gaps: bool = False
+    # With sentinel.zones: per interval, the zones' acquisition dates may lie
+    # at most this many days apart, so each step of the series (and its
+    # mosaic) shows the whole scene at about the same time. A zone without a
+    # scene in the best window takes its scene nearest to it, and the run
+    # reports by how much. None: every zone takes its own least cloudy scene.
+    max_zone_offset_days: int | None = None
 
     def __post_init__(self) -> None:
         if self.every < 1:
             raise ValueError(
                 f"sentinel.timeseries.every must be >= 1, got {self.every}"
             )
+        if self.max_zone_offset_days is not None and self.max_zone_offset_days < 0:
+            raise ValueError(
+                "sentinel.timeseries.max_zone_offset_days must be >= 0, got "
+                f"{self.max_zone_offset_days}"
+            )
+
+
+@dataclass
+class Zones:
+    """Cover a large AOI with a grid of SR chips (zones) run one after another.
+
+    Without zones only one ``edge_size`` chip around the AOI's center is
+    super-resolved (the SR model runs on a whole chip at once, so the chip
+    can't grow with the AOI). With zones every chip of the grid gets its own
+    sentinel_sr run and its own scene search; ``max_items`` applies per zone.
+    Acquire then fetches one DEM over all zones and always builds the DTM in
+    ``native`` mode (``dtm.mode`` is ignored: there is no single optical grid
+    to upsample onto, the tiles are aligned to the DTM at render time).
+    """
+
+    enabled: bool = False
+    # Drop grid cells that don't overlap the AOI geometry (corners of an
+    # irregular AOI); off: the full rectangle around the AOI.
+    clip_to_aoi: bool = True
+    # Besides the tiles and their VRT, write the mosaic as one GeoTIFF.
+    mosaic: bool = False
 
 
 @dataclass
@@ -95,6 +128,7 @@ class Sentinel:
     # instead.
     reference_index: int | None = None
     timeseries: Timeseries = field(default_factory=Timeseries)
+    zones: Zones = field(default_factory=Zones)
 
     def __post_init__(self) -> None:
         if self.max_aoi_cloud is not None and not 0 <= self.max_aoi_cloud <= 100:

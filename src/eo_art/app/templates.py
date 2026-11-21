@@ -1,8 +1,8 @@
 """Starter configs seeded into a freshly created project.
 
-The render template reads exactly the files the acquire stage writes
-(``out/dtm.tif``, ``out/optical_aligned.tif``), so a new project can run
-Acquire -> Render without editing any paths.
+The render template reads the files of the newest acquire run
+(``out/runs/latest-acquire/dtm.tif``, ``.../optical_aligned.tif``), so a new
+project can run Acquire -> Render without editing any paths.
 """
 
 ACQUIRE_TEMPLATE = """\
@@ -52,12 +52,18 @@ run:
   name: {name}
   out_dir: out
 
+# out/runs/latest-acquire is the newest finished acquire run; point at a
+# specific out/runs/<time>-acquire/ to keep rendering an older one.
 input:
-  path: out/dtm.tif
+  path: out/runs/latest-acquire/dtm.tif
 
 overlays:
   - name: optical
-    path: out/optical_aligned.tif
+    path: out/runs/latest-acquire/optical_aligned.tif
+    prepare:
+      # acquire writes B02,B03,B04,... -- pick B04,B03,B02 as R,G,B.
+      - op: rgb_stretch
+        bands: [3, 2, 1]
 
 render:
   width: 2560

@@ -19,6 +19,7 @@ from vecraspy import get_aoi_center
 from eo_art.forge3d_pipes.acquire.schema import Sentinel
 
 MANIFEST_NAME = "manifest.json"
+CANDIDATES_NAME = "candidates.json"
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,31 @@ class Scene:
     datetime: str | None = None
     # Percent of AOI pixels in the SCL cloud classes (None: check disabled).
     aoi_cloud: float | None = None
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """A scene sentinel_sr could super-resolve (``--candidates-only``)."""
+
+    id: str
+    # Acquisition date (YYYY-MM-DD).
+    datetime: str
+    cloud_cover: float | None
+    aoi_cloud: float | None = None
+    # Start date of its timeseries interval.
+    bin: str | None = None
+
+    @property
+    def cloud(self) -> float | None:
+        """The AOI's own cloud share when known, else the tile's."""
+        return self.aoi_cloud if self.aoi_cloud is not None else self.cloud_cover
+
+
+@dataclass(frozen=True)
+class CandidateList:
+    scenes: list[Candidate]
+    # Start dates of all timeseries intervals.
+    bins: list[str]
 
 
 @dataclass(frozen=True)
@@ -55,6 +81,24 @@ def read_manifest(out_dir: str | Path) -> Manifest:
     )
 
 
+def read_candidates(out_dir: str | Path) -> CandidateList:
+    """The candidate list ``sentinel_sr --candidates-only`` writes."""
+    raw = json.loads((Path(out_dir) / CANDIDATES_NAME).read_text())
+    return CandidateList(
+        scenes=[
+            Candidate(
+                id=c["id"],
+                datetime=c["datetime"],
+                cloud_cover=c["cloud_cover"],
+                aoi_cloud=c.get("aoi_cloud"),
+                bin=c.get("bin"),
+            )
+            for c in raw["scenes"]
+        ],
+        bins=raw.get("bins", []),
+    )
+
+
 def read_aoi_center(aoi_path: str | Path) -> tuple[float, float]:
     """Return (lat, lon) for the center of the AOI vector file."""
     aoi_df = gpd.read_file(aoi_path)
@@ -63,24 +107,9 @@ def read_aoi_center(aoi_path: str | Path) -> tuple[float, float]:
     return get_aoi_center(aoi_df)
 
 
-def run_sentinel_sr(
-    cfg: Sentinel,
-    sentinel_sr_dir: str | Path,
-    lat: float,
-    lon: float,
-    out_dir: str | Path,
-    overwrite: bool = False,
-    skip_dates: Sequence[str] = (),
-) -> list[Scene]:
-    """Run the sentinel_sr subprocess and return the written GeoTIFF paths.
-
-    sentinel_sr keeps GeoTIFFs already in ``out_dir`` (resuming an interrupted
-    run) unless ``overwrite``. ``cfg.timeseries`` switches it to one scene per
-    interval; intervals containing one of ``skip_dates`` get none.
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
+def _base_command(
+    cfg: Sentinel, sentinel_sr_dir: str | Path, lat: float, lon: float, out_dir: Path
+) -> list[str]:
     command = [
         "uv",
         "run",
@@ -110,9 +139,6 @@ def run_sentinel_sr(
         "--out",
         str(out_dir),
     ]
-    # A timeseries has one scene per interval; max_items would cut it short.
-    if cfg.max_items is not None and not cfg.timeseries.enabled:
-        command += ["--max-items", str(cfg.max_items)]
     if cfg.max_cloud_cover is not None:
         command += ["--max-cloud-cover", str(cfg.max_cloud_cover)]
     if cfg.max_aoi_cloud is not None:
@@ -129,10 +155,57 @@ def run_sentinel_sr(
             "--every",
             str(cfg.timeseries.every),
         ]
+    return command
+
+
+def run_sentinel_sr(
+    cfg: Sentinel,
+    sentinel_sr_dir: str | Path,
+    lat: float,
+    lon: float,
+    out_dir: str | Path,
+    overwrite: bool = False,
+    skip_dates: Sequence[str] = (),
+    dates: Sequence[str] = (),
+) -> list[Scene]:
+    """Run the sentinel_sr subprocess and return the written GeoTIFF paths.
+
+    sentinel_sr keeps GeoTIFFs already in ``out_dir`` (resuming an interrupted
+    run) unless ``overwrite``. ``cfg.timeseries`` switches it to one scene per
+    interval; intervals containing one of ``skip_dates`` get none. ``dates``
+    instead names the acquisitions to super-resolve directly (chosen from
+    ``list_sentinel_candidates``).
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    command = _base_command(cfg, sentinel_sr_dir, lat, lon, out_dir)
+    # A timeseries has one scene per interval; max_items would cut it short.
+    if cfg.max_items is not None and not cfg.timeseries.enabled and not dates:
+        command += ["--max-items", str(cfg.max_items)]
     if skip_dates:
         command += ["--skip-dates", ",".join(skip_dates)]
+    if dates:
+        command += ["--dates", ",".join(dates)]
     if overwrite:
         command.append("--overwrite")
 
     subprocess.run(command, check=True)
     return read_manifest(out_dir).scenes
+
+
+def list_sentinel_candidates(
+    cfg: Sentinel,
+    sentinel_sr_dir: str | Path,
+    lat: float,
+    lon: float,
+    out_dir: str | Path,
+) -> CandidateList:
+    """Every scene sentinel_sr could pick for this chip (after duplicate and
+    cloud checks, tagged with its interval), without running SR."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    command = _base_command(cfg, sentinel_sr_dir, lat, lon, out_dir)
+    command.append("--candidates-only")
+    subprocess.run(command, check=True)
+    return read_candidates(out_dir)

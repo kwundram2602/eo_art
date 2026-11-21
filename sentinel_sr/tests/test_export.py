@@ -173,3 +173,57 @@ def test_skip_dates_are_ignored_without_an_interval(stubbed, tmp_path):
     result = _export(tmp_path, skip_dates=["2023-02-01"])
 
     assert "2023-02-14" in [s.datetime for s in result.scenes]
+
+
+def _candidates(**kwargs):
+    return rgbn.list_candidates(
+        lat=50.0,
+        lon=8.0,
+        start_date="2023-01-01",
+        end_date="2023-06-30",
+        bands=BANDS,
+        **kwargs,
+    )
+
+
+def test_list_candidates_runs_no_sr(stubbed, monkeypatch):
+    monkeypatch.setattr(rgbn.mlstac, "load", lambda path: pytest.fail("no model"))
+
+    result = _candidates(interval="month", max_aoi_cloud=10.0)
+
+    # Duplicates collapsed, the other-zone March tile and the cloudy April
+    # scene dropped; both May overflights stay candidates.
+    assert [(c.datetime, c.cloud_cover, c.aoi_cloud, c.bin) for c in result.scenes] == [
+        ("2023-02-14", 2.78, 0.0, "2023-02-01"),
+        ("2023-05-05", 9.0, 0.0, "2023-05-01"),
+        ("2023-05-20", 1.0, 6.25, "2023-05-01"),
+    ]
+    assert result.scenes[0].id.endswith("T32ULE_20240815T232641")
+    assert result.bins == [f"2023-0{m}-01" for m in range(1, 7)]
+
+
+def test_list_candidates_without_interval_has_no_bins(stubbed):
+    result = _candidates()
+
+    assert [c.datetime for c in result.scenes] == [
+        "2023-02-14",
+        "2023-04-02",
+        "2023-05-05",
+        "2023-05-20",
+    ]
+    assert result.bins == []
+    assert all(c.bin is None and c.aoi_cloud is None for c in result.scenes)
+
+
+def test_dates_select_exactly_those_acquisitions(stubbed, tmp_path, capsys):
+    result = _export(
+        tmp_path,
+        dates=["2023-05-20", "2023-02-14", "2023-03-01"],
+        max_aoi_cloud=1.0,
+    )
+
+    # No interval selection and no SCL filter: the dates were chosen upstream.
+    assert [s.datetime for s in result.scenes] == ["2023-02-14", "2023-05-20"]
+    assert result.scenes[1].path.name.startswith("superres_2023-05-20_")
+    assert result.skipped_bins == []
+    assert "no acquisition on 2023-03-01" in capsys.readouterr().out

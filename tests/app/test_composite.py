@@ -225,3 +225,68 @@ def test_encode_gif_roundtrip(loop):
         assert ("loop" in gif.info) is loop
         gif.seek(2)
         assert np.array(gif.convert("RGB"))[0, 0].tolist() == [255, 255, 255]
+
+
+def test_timeseries_frames_only_dated_steps_in_date_order(tmp_path, make_sr_tif):
+    folder = tmp_path / "alps_sr_timeseries"
+    feb = make_sr_tif(folder / "alps_sr_2023-02-01.tif")
+    jan = make_sr_tif(folder / "alps_sr_2023-01-01.tif")
+    make_sr_tif(folder / "alps_sr_2023-01-01_indices.tif")
+
+    assert cp.timeseries_frames(folder) == [jan, feb]
+    assert cp.frame_label(jan) == "2023-01-01"
+    assert cp.slug("Color · NDVI (B8)") == "color-ndvi-b8"
+
+
+def test_build_gif_skips_frames_on_another_grid(tmp_path, make_sr_tif):
+    folder = tmp_path / "ts"
+    jan = make_sr_tif(folder / "alps_sr_2023-01-01.tif")
+    feb = make_sr_tif(folder / "alps_sr_2023-02-01.tif")
+    other = tmp_path / "other" / "alps_sr_2023-03-01.tif"
+    make_sr_tif(other)
+    with rasterio.open(other) as src:
+        profile, data = src.profile, src.read()
+    profile.update(width=8)
+    with rasterio.open(other, "w", **profile) as dst:
+        dst.write(data[:, :, :8])
+
+    steps = []
+    result = cp.build_gif(
+        [jan, feb, other],
+        ("B04", "B03", "B02"),
+        cp.Stretch(cp.Method.PERCENTILE, 2.0, 98.0),
+        None,
+        (8, 16),
+        0.5,
+        True,
+        progress=lambda fraction, text: steps.append(fraction),
+    )
+
+    assert result.data is not None
+    assert result.skipped == ["2023-03-01 (grid (8, 8))"]
+    assert steps == sorted(steps) and steps[-1] < 1.0
+    # Both kept frames are identical fixtures, which Pillow merges into one.
+    assert Image.open(io.BytesIO(result.data)).format == "GIF"
+
+
+def test_build_gif_without_matching_frames_returns_none(tmp_path, make_sr_tif):
+    frame = make_sr_tif(tmp_path / "alps_sr_2023-01-01.tif", descriptions=None)
+    result = cp.build_gif(
+        [frame],
+        ("NOPE",),
+        cp.Stretch(cp.Method.PERCENTILE, 2.0, 98.0),
+        "gray",
+        (8, 16),
+        0.5,
+        False,
+    )
+    assert result.data is None
+    assert result.skipped == ["2023-01-01 (no NOPE)"]
+
+
+def test_histogram_png(tmp_path):
+    values = np.linspace(0, 1, 500, dtype="float32").reshape(20, 25)
+    png = cp.histogram_png(values, "B04", (0.1, 0.9))
+    assert png is not None
+    assert Image.open(io.BytesIO(png)).format == "PNG"
+    assert cp.histogram_png(np.full((4, 4), np.nan, dtype="float32"), "B04") is None

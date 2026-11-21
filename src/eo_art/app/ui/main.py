@@ -1,52 +1,43 @@
-"""Entry script for ``streamlit run`` (see ``eo_art.app.launcher``)."""
+"""Flet entry point (see ``eo_art.app.launcher``)."""
 
-import streamlit as st
+import asyncio
+
+import flet as ft
 
 from eo_art.app.launcher import projects_dir
-from eo_art.app.projects import list_projects
-from eo_art.app.ui import (
-    page_aoi,
-    page_composite,
-    page_configs,
-    page_projects,
-    page_results,
-    page_run,
-)
-from eo_art.app.ui.common import active_runs, current_project, select_project
+from eo_art.app.projects import is_project
+from eo_art.app.ui.layout import App
+from eo_art.app.ui.state import AppState
 
-st.set_page_config(page_title="eo-art", page_icon="🏔️", layout="wide")
+LAST_PROJECT_KEY = "eoart.last_project"
+POLL_SECONDS = 1.0
 
 
-def _sidebar() -> None:
-    st.sidebar.caption(f"Projects folder: `{projects_dir()}`")
-    names = [p.name for p in list_projects(projects_dir())]
-    if not names:
-        st.sidebar.info("No projects yet — create one on the Projects page.")
-        return
-    current = current_project()
-    index = names.index(current.name) if current else None
-    choice = st.sidebar.selectbox(
-        "Project", names, index=index, placeholder="Select a project"
-    )
-    if choice and (current is None or choice != current.name):
-        select_project(choice)
-        st.rerun()
-    if current is not None:
-        handle = active_runs().get(str(current.root))
-        if handle is not None and handle.running:
-            st.sidebar.warning(f"Pipeline running: `{handle.log_path.name}`")
+async def main(page: ft.Page) -> None:
+    page.title = "eo-art"
+    page.theme = ft.Theme(color_scheme_seed=ft.Colors.TEAL)
+    page.dark_theme = ft.Theme(color_scheme_seed=ft.Colors.TEAL)
+    page.theme_mode = ft.ThemeMode.SYSTEM
 
+    prefs = ft.SharedPreferences()
+    page.services.append(prefs)
+    state = AppState()
+    last = await prefs.get(LAST_PROJECT_KEY)
+    if isinstance(last, str) and is_project(projects_dir() / last):
+        state.select(last)
 
-_sidebar()
-st.navigation(
-    [
-        st.Page(page_projects.render, title="Projects", icon="📁", url_path="projects"),
-        st.Page(page_aoi.render, title="AOI", icon="🗺️", url_path="aoi"),
-        st.Page(page_configs.render, title="Configs", icon="⚙️", url_path="configs"),
-        st.Page(page_run.render, title="Run", icon="▶️", url_path="run"),
-        st.Page(page_results.render, title="Results", icon="🖼️", url_path="results"),
-        st.Page(
-            page_composite.render, title="Composite", icon="🎨", url_path="composite"
-        ),
-    ]
-).run()
+    page.render_views(App, state)
+
+    async def poll() -> None:
+        # One poller for the AppBar run status (run tabs tail the log
+        # themselves) and for remembering the selected project.
+        saved = state.project_name
+        while True:
+            if state.sync_run():
+                state.refresh()
+            if state.project_name and state.project_name != saved:
+                saved = state.project_name
+                await prefs.set(LAST_PROJECT_KEY, saved)
+            await asyncio.sleep(POLL_SECONDS)
+
+    page.run_task(poll)

@@ -47,6 +47,11 @@ def register_op(name: str, schema: type) -> Callable[[F], F]:
     return decorator
 
 
+def op_names() -> list[str]:
+    """Names of all registered ops, in registration order."""
+    return list(_OPS)
+
+
 def get_op(name: str) -> RegisteredOp:
     try:
         return _OPS[name]

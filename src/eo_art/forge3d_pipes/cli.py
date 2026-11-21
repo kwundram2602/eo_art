@@ -2,6 +2,7 @@
 
 import argparse
 from collections.abc import Sequence
+from pathlib import Path
 
 from eo_art.forge3d_pipes.pipeline import run
 
@@ -72,6 +73,12 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="rerun the acquire stage instead of reusing a cached result",
     )
+    run_cmd.add_argument(
+        "--acquire-run-id",
+        default=None,
+        help="name of the acquire run folder under <out>/runs/ "
+        "(default: <YYYYmmdd-HHMMSS>-acquire)",
+    )
 
     acquire_cmd = sub.add_parser(
         "acquire", help="fetch and prepare terrain/optical inputs for a render"
@@ -86,11 +93,24 @@ def _parser() -> argparse.ArgumentParser:
     acquire_cmd.add_argument(
         "--no-cache", action="store_true", help="rerun even if cached outputs exist"
     )
+    acquire_cmd.add_argument(
+        "--run-id",
+        default=None,
+        help="name of the run folder under <out>/runs/ "
+        "(default: <YYYYmmdd-HHMMSS>-acquire)",
+    )
 
     return parser
 
 
-def _run_acquire_stage(acquire_config: str, out_dir: str | None, use_cache: bool):
+def _run_acquire_stage(
+    acquire_config: str,
+    out_dir: str | None,
+    use_cache: bool,
+    run_id: str | None = None,
+):
+    """Acquire into a new run folder ``<out>/runs/<run_id>/`` (cache shared
+    under ``<out>/_acquire``); ``runs/latest-acquire`` follows on success."""
     from typing import cast
 
     from omegaconf import OmegaConf
@@ -107,7 +127,19 @@ def _run_acquire_stage(acquire_config: str, out_dir: str | None, use_cache: bool
             "note: acquire ignores sentinel.timeseries (it needs one reference "
             "scene); run eo-art-sr for the timeseries"
         )
-    return run_acquire(cfg, out_dir or cfg.out_dir, use_cache=use_cache)
+    from eo_art.forge3d_pipes.acquire.runs import (
+        link_latest,
+        new_run_dir,
+        write_run_config,
+    )
+
+    out = out_dir or cfg.out_dir
+    run_dir = new_run_dir(out, "acquire", run_id)
+    write_run_config(run_dir, cfg)
+    print(f"run     -> {run_dir}")
+    result = run_acquire(cfg, out, use_cache=use_cache, run_dir=run_dir)
+    link_latest(out, "acquire", run_dir)
+    return result
 
 
 def _apply_acquire_result(configs, acquire_overlay, result):
@@ -143,13 +175,75 @@ def _apply_acquire_result(configs, acquire_overlay, result):
                 f"`overlays:` (have: {names})"
             )
         overlay_index = names.index(acquire_overlay)
-    raw.overlays[overlay_index].path = str(result.optical_path)
+    if result.zones is not None:
+        _expand_zone_overlays(raw, overlay_index, result.zones.tiles)
+    else:
+        raw.overlays[overlay_index].path = str(result.optical_path)
 
     tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", delete=False, prefix="eo-art-acquired-"
     )
     OmegaConf.save(raw, tmp.name)
     return tmp.name
+
+
+def _expand_zone_overlays(raw, overlay_index, tiles):
+    """Replace overlay ``overlay_index`` by one copy per SR zone tile.
+
+    Every copy keeps the entry's settings and is snapped onto the DTM at
+    render time (``align_to_dem``). Its ``rgb_stretch`` ops get fixed bounds
+    pooled over all tiles, so the tiles share one stretch instead of each
+    being levelled on its own (which shows as brightness seams).
+    """
+    import copy
+
+    from omegaconf import OmegaConf
+
+    from eo_art.forge3d_pipes.prep.ops import RgbStretchCfg, stretch_bounds_over
+
+    node = raw.overlays[overlay_index]
+    name = node.name
+    prepare = OmegaConf.to_container(node.prepare, resolve=True)
+    assert isinstance(prepare, list)
+    stretch_ops = [
+        i
+        for i, op in enumerate(prepare)
+        if isinstance(op, dict) and op.get("op") == "rgb_stretch"
+    ]
+    if not stretch_ops:
+        print(
+            f"warning: overlay {name!r} has no rgb_stretch op, so each zone "
+            "tile is stretched on its own and tiles may differ in brightness"
+        )
+    shared_bounds = {}
+    for i in stretch_ops:
+        params = {k: v for k, v in prepare[i].items() if k != "op"}
+        if "lower_value" in params or "upper_value" in params:
+            continue
+        stretch = OmegaConf.to_object(
+            OmegaConf.merge(OmegaConf.structured(RgbStretchCfg), params)
+        )
+        assert isinstance(stretch, RgbStretchCfg)
+        shared_bounds[i] = stretch_bounds_over(tiles, stretch)
+
+    copies = []
+    for tile in tiles:
+        zone_id = Path(tile).stem.rsplit("_sr_", 1)[-1]
+        entry = copy.deepcopy(node)
+        entry.name = f"{name}_{zone_id}"
+        entry.path = str(tile)
+        entry.align_to_dem = True
+        for i, (lo, hi) in shared_bounds.items():
+            entry.prepare[i].lower_value = lo
+            entry.prepare[i].upper_value = hi
+        copies.append(entry)
+    overlays = list(raw.overlays)
+    raw.overlays = [
+        *overlays[:overlay_index],
+        *copies,
+        *overlays[overlay_index + 1 :],
+    ]
+    print(f"--acquire: {len(copies)} zone tile overlay(s) from {name!r}")
 
 
 def _run_command(args: argparse.Namespace) -> int:
@@ -160,7 +254,10 @@ def _run_command(args: argparse.Namespace) -> int:
     configs = list(args.configs)
     if args.acquire:
         result = _run_acquire_stage(
-            args.acquire, args.out, use_cache=not args.acquire_no_cache
+            args.acquire,
+            args.out,
+            use_cache=not args.acquire_no_cache,
+            run_id=args.acquire_run_id,
         )
         configs = [_apply_acquire_result(configs, args.acquire_overlay, result)]
 
@@ -183,9 +280,20 @@ def _run_command(args: argparse.Namespace) -> int:
 
 
 def _acquire_command(args: argparse.Namespace) -> int:
-    result = _run_acquire_stage(args.config, args.out, use_cache=not args.no_cache)
+    result = _run_acquire_stage(
+        args.config, args.out, use_cache=not args.no_cache, run_id=args.run_id
+    )
     print(f"dtm     -> {result.dtm_path}")
-    print(f"optical -> {result.optical_path}")
+    if result.zones is not None:
+        zones = result.zones
+        print(f"zones   -> {zones.out_dir} ({len(zones.tiles)} tile(s))")
+        print(f"vrt     -> {zones.vrt}")
+        if zones.mosaic:
+            print(f"mosaic  -> {zones.mosaic}")
+        if zones.empty_zones:
+            print(f"no scene for zone(s) {', '.join(zones.empty_zones)}")
+    else:
+        print(f"optical -> {result.optical_path}")
     return 0
 
 

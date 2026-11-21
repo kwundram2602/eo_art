@@ -98,3 +98,56 @@ def test_chip_bounds_is_square_in_metres():
     # At 60°N a degree of longitude is half as long as one of latitude.
     assert (east - west) == pytest.approx(2 * (north - south))
     assert (south + north) / 2 == pytest.approx(60.0)
+
+
+def test_rectangle_feature_from_any_two_corners_roundtrips(tmp_path):
+    from eo_art.app.aoi import outlines, rectangle_feature
+
+    feature = rectangle_feature((47.6, 11.2), (47.5, 11.0))
+    path = save_features([feature], tmp_path / "rect.gpkg")
+
+    (ring,) = outlines(path)
+    lats = sorted({round(lat, 6) for lat, _ in ring})
+    lons = sorted({round(lon, 6) for _, lon in ring})
+    assert lats == [47.5, 47.6]
+    assert lons == [11.0, 11.2]
+
+
+def test_polygon_and_rectangle_reject_degenerate_input():
+    from eo_art.app.aoi import polygon_feature, rectangle_feature
+
+    with pytest.raises(ValueError, match="at least 3"):
+        polygon_feature([(1.0, 1.0), (2.0, 2.0)])
+    with pytest.raises(ValueError, match="no area"):
+        rectangle_feature((1.0, 1.0), (1.0, 2.0))
+
+
+def test_polygon_feature_closes_ring_in_lon_lat_order():
+    from eo_art.app.aoi import polygon_feature
+
+    ring = polygon_feature([(10.0, 1.0), (10.0, 2.0), (11.0, 2.0)])["geometry"][
+        "coordinates"
+    ][0]
+    assert ring == [[1.0, 10.0], [2.0, 10.0], [2.0, 11.0], [1.0, 10.0]]
+
+
+def test_zone_rings_cover_the_aoi_like_the_pipeline(tmp_path):
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    from eo_art.app.aoi import zone_grid, zone_rings
+
+    path = tmp_path / "big.gpkg"
+    # ~3 x 2 km in UTM 32N.
+    gpd.GeoDataFrame(
+        geometry=[box(652_000, 5_208_000, 655_000, 5_210_000)], crs="EPSG:32632"
+    ).to_file(path)
+
+    grid = zone_grid(path, 128, 10)
+    rings = zone_rings(grid)
+
+    assert len(rings) == len(grid.zones) == 6
+    for ring, zone in zip(rings, grid.zones, strict=True):
+        assert ring[0] == ring[-1] and len(ring) == 5
+        lats = [lat for lat, _ in ring]
+        assert min(lats) < zone.lat < max(lats)

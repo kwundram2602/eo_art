@@ -6,6 +6,7 @@ created.
 """
 
 import re
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -121,4 +122,28 @@ def adopt_folder(base: Path, name: str) -> Project:
             target.write_text(text)
     if not is_project(root):
         _write_marker(root)
+    return project
+
+
+def copy_project(base: Path, source: Project, name: str) -> Project:
+    """A new project ``name`` with ``source``'s top-level configs and AOIs.
+
+    Configs are copied verbatim (relative ``aoi_path``s keep working, as the
+    AOIs come along); subfolders of configs/ and everything in out/ stay
+    behind.
+    """
+    name = validate_name(name)
+    root = base / name
+    if root.exists():
+        raise FileExistsError(f"{root} already exists")
+    project = Project(root)
+    _ensure_layout(project)
+    for path in [*source.config_files(), *source.aoi_files()]:
+        target_dir = (
+            project.configs_dir
+            if path.parent == source.configs_dir
+            else project.aoi_dir
+        )
+        shutil.copy2(path, target_dir / path.name)
+    _write_marker(root)
     return project

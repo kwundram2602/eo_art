@@ -294,23 +294,33 @@ class OverlayCfg:
 
 @dataclass
 class Orbit:
+    """Camera path of an orbit animation.
+
+    Unset ``*_start`` values come from ``render.camera``, so the video starts
+    where the still image is taken from; unset ``*_end`` values hold the start
+    value, except ``phi_end``, which defaults to one full turn (start + 360).
+    """
+
     duration: float = 8.0
-    phi_start: float = 0.0
-    phi_end: float = 360.0
-    theta_start: float = 12.0
+    phi_start: float | None = None
+    phi_end: float | None = None
+    theta_start: float | None = None
     theta_end: float | None = None
-    radius_start: float = 26000.0
+    radius_start: float | None = None
     radius_end: float | None = None
-    fov_start: float = 60.0
+    fov_start: float | None = None
     fov_end: float | None = None
 
     def __post_init__(self) -> None:
         _positive("orbit.duration", self.duration)
-        _positive("orbit.radius_start", self.radius_start)
+        if self.radius_start is not None:
+            _positive("orbit.radius_start", self.radius_start)
         # The same angles Camera constrains, so an out-of-range orbit is
         # rejected at load rather than reaching the viewer.
-        _in_range("orbit.theta_start", self.theta_start, 0.0, 90.0)
-        _in_range("orbit.fov_start", self.fov_start, 1.0, 179.0)
+        if self.theta_start is not None:
+            _in_range("orbit.theta_start", self.theta_start, 0.0, 90.0)
+        if self.fov_start is not None:
+            _in_range("orbit.fov_start", self.fov_start, 1.0, 179.0)
         if self.theta_end is not None:
             _in_range("orbit.theta_end", self.theta_end, 0.0, 90.0)
         if self.fov_end is not None:

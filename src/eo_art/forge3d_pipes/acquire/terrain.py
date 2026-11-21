@@ -8,8 +8,11 @@ import geets
 import geopandas as gpd
 import rasterio
 from geets.terrain import load_copernicus_dem, load_fabdem, load_srtm
+from rasterio import CRS
 from rasterio.warp import transform_bounds
 from rasterio.windows import from_bounds
+from shapely.geometry import box
+from shapely.geometry.base import BaseGeometry
 from vecraspy import tif_bounds_as_polygon
 
 from eo_art.forge3d_pipes.acquire.schema import DemSource
@@ -37,20 +40,63 @@ def fetch_terrain_dem(
     sources in ``_LOADERS``, a dead end for high-resolution DEMs. Use
     ``fetch_local_dem`` with a downloaded GeoTIFF for those instead.
     """
-    geets.initialize_ee(project=ee_project)
-
     reference_tif = Path(reference_tif)
     ref_polygon = tif_bounds_as_polygon(reference_tif, exact=True)
     with rasterio.open(reference_tif) as src:
         ref_crs = src.crs
+    return _download_ee_dem(
+        ref_polygon,
+        ref_crs,
+        out_dir,
+        source=source,
+        ee_project=ee_project,
+        scale=scale,
+        filename=filename,
+    )
 
-    aoi_gdf = gpd.GeoDataFrame(geometry=[ref_polygon], crs=ref_crs)
+
+def fetch_terrain_dem_bounds(
+    bounds: tuple[float, float, float, float],
+    crs: str | CRS,
+    out_dir: str | Path,
+    *,
+    source: DemSource,
+    ee_project: str,
+    scale: float,
+    filename: str = "dem",
+) -> Path:
+    """Like ``fetch_terrain_dem``, for ``(minx, miny, maxx, maxy)`` in ``crs``
+    instead of a reference raster's footprint (e.g. all zones of a grid)."""
+    return _download_ee_dem(
+        box(*bounds),
+        CRS.from_user_input(crs),
+        out_dir,
+        source=source,
+        ee_project=ee_project,
+        scale=scale,
+        filename=filename,
+    )
+
+
+def _download_ee_dem(
+    region: BaseGeometry,
+    crs: CRS,
+    out_dir: str | Path,
+    *,
+    source: DemSource,
+    ee_project: str,
+    scale: float,
+    filename: str,
+) -> Path:
+    geets.initialize_ee(project=ee_project)
+
+    aoi_gdf = gpd.GeoDataFrame(geometry=[region], crs=crs)
     aoi = geemap.geopandas_to_ee(aoi_gdf).geometry()
 
     dem_image = _LOADERS[source](aoi, clip=True)
 
     return geets.l_download_image(
-        dem_image, Path(out_dir), filename, scale=scale, region=aoi, crs=str(ref_crs)
+        dem_image, Path(out_dir), filename, scale=scale, region=aoi, crs=str(crs)
     )
 
 
@@ -70,12 +116,30 @@ def fetch_local_dem(
     and optical raster ultimately share.
     """
     reference_tif = Path(reference_tif)
+    with rasterio.open(reference_tif) as ref_src:
+        ref_bounds = tuple(ref_src.bounds)
+        ref_crs = ref_src.crs
+    return fetch_local_dem_bounds(
+        ref_bounds, ref_crs, out_dir, path=path, filename=filename, label=reference_tif
+    )
+
+
+def fetch_local_dem_bounds(
+    bounds: tuple[float, float, float, float],
+    crs: str | CRS,
+    out_dir: str | Path,
+    *,
+    path: str | Path,
+    filename: str = "dem",
+    label: object = None,
+) -> Path:
+    """Like ``fetch_local_dem``, for ``(minx, miny, maxx, maxy)`` in ``crs``
+    instead of a reference raster's footprint. ``label`` names the area in
+    the error raised when the DEM doesn't cover it."""
     dem_path = Path(path)
     out_path = Path(out_dir) / f"{filename}.tif"
-
-    with rasterio.open(reference_tif) as ref_src:
-        ref_bounds = ref_src.bounds
-        ref_crs = ref_src.crs
+    ref_bounds = bounds
+    ref_crs = CRS.from_user_input(crs)
 
     with rasterio.open(dem_path) as dem_src:
         dem_bounds = dem_src.bounds
@@ -89,7 +153,7 @@ def fetch_local_dem(
         ):
             raise ValueError(
                 f"local DEM {dem_path} does not cover the footprint of "
-                f"{reference_tif} (dem bounds={dem_bounds}, reference "
+                f"{label or bounds} (dem bounds={dem_bounds}, reference "
                 f"bounds in dem CRS={window_bounds})"
             )
 
