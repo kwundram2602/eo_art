@@ -2,6 +2,7 @@
 
 import os
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,12 +18,17 @@ os.environ.setdefault("GDAL_HTTP_RETRY_DELAY", "5")
 
 import cubo
 import mlstac
+import pandas as pd
 import rasterio
 import rioxarray  # noqa: F401 (registers the .rio accessor on xarray objects)
 import torch
 import torch.nn.functional as F
 import xarray as xr
 from torch.nn.attention import SDPBackend, sdpa_kernel
+
+from sentinel_sr.clouds import DEFAULT_CLOUD_CLASSES, SCL_BAND, cloud_percent
+from sentinel_sr.scenes import dedupe
+from sentinel_sr.timeseries import Bins, select_timesteps
 
 BANDS_10 = ("B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12")
 
@@ -31,6 +37,17 @@ BANDS_10 = ("B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12"
 class Scene:
     path: Path
     cloud_cover: float | None
+    # Acquisition date (YYYY-MM-DD).
+    datetime: str | None = None
+    # Percent of AOI pixels in the SCL cloud classes (None: check disabled).
+    aoi_cloud: float | None = None
+
+
+@dataclass(frozen=True)
+class ExportResult:
+    scenes: list[Scene]
+    # Timeseries runs only: start dates of intervals without any scene.
+    skipped_bins: list[str]
 
 
 def _patch_vae_attention_for_low_vram() -> None:
@@ -166,6 +183,30 @@ def _patch_swin_for_low_vram(chunk: int = 512) -> None:
     Mlp.forward = mlp_forward
 
 
+def band_descriptions(da: xr.DataArray, bands: tuple[str, ...]) -> list[str]:
+    """GeoTIFF band descriptions from the STAC eo:bands common names.
+
+    stackstac (via cubo) carries each asset's eo:bands ``common_name`` as a
+    coordinate on the band axis. Names shared by several bands (Planetary
+    Computer tags B05/B06/B07 all as ``rededge``) get the band id appended so
+    every description stays unique; bands without a common name keep their id.
+    """
+    common = (
+        [str(name) if name else "" for name in da.coords["common_name"].values]
+        if "common_name" in da.coords
+        else [""] * len(bands)
+    )
+    names = []
+    for band, name in zip(bands, common, strict=True):
+        if not name or name in ("None", "nan"):
+            names.append(band)
+        elif common.count(name) > 1:
+            names.append(f"{name}_{band}")
+        else:
+            names.append(name)
+    return names
+
+
 def export_superres_tifs(
     lat: float,
     lon: float,
@@ -181,8 +222,31 @@ def export_superres_tifs(
     max_items: int | None = None,
     max_cloud_cover: float | None = None,
     device: torch.device | None = None,
-) -> list[Scene]:
-    """Super-resolve every Sentinel-2 acquisition for an AOI (center point + edge_size) and write one GeoTIFF per timestep."""
+    interval: str | None = None,
+    every: int = 1,
+    overwrite: bool = False,
+    max_aoi_cloud: float | None = None,
+    scl_classes: tuple[int, ...] = DEFAULT_CLOUD_CLASSES,
+    skip_dates: Sequence[str] = (),
+) -> ExportResult:
+    """Super-resolve Sentinel-2 acquisitions for an AOI (center point +
+    edge_size) and write one GeoTIFF per timestep.
+
+    Without ``interval`` every acquisition is processed. With one (``day``,
+    ``week``, ``month``, ``year``) only the least cloudy scene per ``every``
+    intervals is, chosen from STAC metadata before any pixels are fetched.
+    Scenes are fetched, super-resolved and written one at a time; an existing
+    output is reused unless ``overwrite``, so an interrupted run resumes.
+
+    With ``max_aoi_cloud`` (percent) the SCL band is fetched for every
+    candidate first: scenes with more AOI pixels in ``scl_classes`` are
+    dropped, and a timeseries ranks the rest by that AOI cloud share instead
+    of the tile-wide ``eo:cloud_cover``.
+
+    ``skip_dates`` (timeseries only): intervals containing one of these dates
+    are already done (e.g. timesteps from an earlier run) and get no scene;
+    only the other intervals are searched, so a series can be filled up.
+    """
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -196,7 +260,8 @@ def export_superres_tifs(
         lat=lat,
         lon=lon,
         collection=collection,
-        bands=list(bands),
+        # SCL rides along in the same cube, so its items and grid match.
+        bands=[*bands, SCL_BAND] if max_aoi_cloud is not None else list(bands),
         start_date=start_date,
         end_date=end_date,
         stac=stac,
@@ -205,12 +270,99 @@ def export_superres_tifs(
         query=query,
     )
     epsg = da.attrs["epsg"]
+    spectral = da.sel(band=list(bands))
+    band_names = band_descriptions(spectral, bands)
+
+    # stackstac (via cubo) promotes STAC item properties to per-timestep
+    # coordinates, so cloud cover travels with the scene; not every
+    # collection carries it (only those using the eo extension).
+    n_all = da.sizes["time"]
+    cloud_covers: list[float | None] = (
+        [None if pd.isna(c) else float(c) for c in da.coords["eo:cloud_cover"].values]
+        if "eo:cloud_cover" in da.coords
+        else [None] * n_all
+    )
+    # One item per overflight: Planetary Computer lists the same acquisition
+    # once per covering tile and once per processing baseline.
+    deduped = dedupe([str(i) for i in da.id.values], cloud_covers, epsg=int(epsg))
+    unique = deduped.kept
+    print(f"{n_all} scenes, {len(unique)} after removing duplicates")
+    if deduped.other_zone:
+        print(
+            f"Skipped {len(deduped.other_zone)} acquisition(s) only available "
+            f"from tiles outside EPSG:{epsg} (reprojecting them leaves seams): "
+            + ", ".join(deduped.other_zone)
+        )
+
+    if interval is not None and skip_dates:
+        # Before the SCL fetch: done intervals don't need their candidates.
+        bins = Bins(start_date, end_date, interval, every)
+        filled = bins.of(skip_dates)
+        unique = [i for i in unique if bins.index(da.time.values[i]) not in filled]
+        print(
+            f"Timeseries: {len(filled)} interval(s) already filled, "
+            f"{len(unique)} candidate scene(s) left for the others"
+        )
+
+    aoi_cloud: dict[int, float] = {}
+    if max_aoi_cloud is not None and unique:
+        # One parallel fetch of the small SCL chips of all candidates.
+        scl = da.sel(band=SCL_BAND).isel(time=unique).compute().to_numpy()
+        aoi_cloud = {
+            i: cloud_percent(chip, scl_classes)
+            for i, chip in zip(unique, scl, strict=True)
+        }
+        cloudy = [i for i in unique if aoi_cloud[i] > max_aoi_cloud]
+        unique = [i for i in unique if aoi_cloud[i] <= max_aoi_cloud]
+        print(
+            f"SCL check (classes {list(scl_classes)}): {len(cloudy)} scene(s) over "
+            f"{max_aoi_cloud}% cloud in the AOI dropped, {len(unique)} left"
+            + (
+                ": "
+                + ", ".join(
+                    f"{pd.Timestamp(da.time.values[i]).date()} "
+                    f"({aoi_cloud[i]:.1f}%)"
+                    for i in cloudy
+                )
+                if cloudy
+                else ""
+            )
+        )
+
+    skipped_bins: list[str] = []
+    if interval is None:
+        selected = unique
+        if max_items is not None:
+            selected = selected[:max_items]
+    else:
+        selection = select_timesteps(
+            da.time.values[unique],
+            # The AOI's own cloud share when known, else the tile's.
+            [aoi_cloud.get(i, cloud_covers[i]) for i in unique],
+            start_date,
+            end_date,
+            interval,
+            every,
+            filled_dates=skip_dates,
+        )
+        selected = [unique[i] for i in selection.indices]
+        skipped_bins = selection.skipped_bins
+        print(
+            f"Timeseries: {len(selected)} of {len(unique)} scenes selected "
+            f"(one per {every} {interval}(s)), {len(skipped_bins)} empty interval(s)"
+            + (f": {', '.join(skipped_bins)}" if skipped_bins else "")
+        )
+        # The interval decides how many scenes a timeseries has; capping it
+        # would silently cut the series short.
+        if max_items is not None:
+            print(f"Timeseries: ignoring max_items={max_items}")
+
     _patch_vae_attention_for_low_vram()
     _patch_swin_for_low_vram()
     loaded_model = mlstac.load(str(model_path))
     model = loaded_model.compiled_model(device=device)
 
-    n_time = da.sizes["time"]
+    n_time = len(selected)
     in_edge = loaded_model.item.properties["mlm:input"][0]["input"]["shape"][-1]
     out_edge = loaded_model.item.properties["mlm:output"][0]["result"]["shape"][-1]
     scale = out_edge / in_edge
@@ -226,10 +378,25 @@ def export_superres_tifs(
     )
 
     written_paths = []
-    for i in range(da.sizes["time"]):
-        if max_items is not None and i >= max_items:
-            break
-        da_t = da[i]
+    for step, i in enumerate(selected, start=1):
+        da_t = spectral[i]
+        date = pd.Timestamp(da_t.time.values).date().isoformat()
+        # `id` (not `time`) is the unique key: overlapping tiles from the same
+        # orbit, or duplicate reprocessing baselines, can share the same timestamp.
+        scene_id = str(da_t.id.values)
+        name = f"superres_{date}_{scene_id}" if interval else f"superres_{scene_id}"
+        out_path = output_dir / f"{name}.tif"
+        scene = Scene(
+            path=out_path,
+            cloud_cover=cloud_covers[i],
+            datetime=date,
+            aoi_cloud=aoi_cloud.get(i),
+        )
+        if out_path.exists() and not overwrite:
+            written_paths.append(scene)
+            print(f"[{step}/{n_time}] Kept existing {out_path}")
+            continue
+
         s2_numpy = (da_t.compute().to_numpy() / 10_000).astype("float32")
 
         X = torch.from_numpy(s2_numpy).float().to(device)
@@ -251,22 +418,15 @@ def export_superres_tifs(
         )
         sr_da = sr_da.rio.write_crs(f"EPSG:{epsg}")
         sr_da = sr_da.rio.write_transform(sr_transform)
+        # rioxarray writes a list-valued long_name as per-band descriptions.
+        sr_da.attrs["long_name"] = band_names
 
-        # `id` (not `time`) is the unique key: overlapping tiles from the same
-        # orbit, or duplicate reprocessing baselines, can share the same timestamp.
-        scene_id = str(da_t.id.values)
-        out_path = output_dir / f"superres_{scene_id}.tif"
         sr_da.rio.to_raster(out_path)
 
-        # stackstac (via cubo) promotes STAC item properties to per-timestep
-        # coordinates, so cloud cover travels with the scene; not every
-        # collection carries it (only those using the eo extension).
-        cloud_cover = (
-            float(da_t.coords["eo:cloud_cover"].item())
-            if "eo:cloud_cover" in da_t.coords
-            else None
+        written_paths.append(scene)
+        print(
+            f"[{step}/{n_time}] Wrote {out_path} "
+            f"({date}, cloud_cover={scene.cloud_cover})"
         )
-        written_paths.append(Scene(path=out_path, cloud_cover=cloud_cover))
-        print(f"Wrote {out_path} (cloud_cover={cloud_cover})")
 
-    return written_paths
+    return ExportResult(scenes=written_paths, skipped_bins=skipped_bins)
