@@ -41,6 +41,8 @@ class Scene:
     datetime: str | None = None
     # Percent of AOI pixels in the SCL cloud classes (None: check disabled).
     aoi_cloud: float | None = None
+    # lr_only runs: the scene's SCL band as its own GeoTIFF.
+    scl_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -444,6 +446,7 @@ def export_superres_tifs(
     scl_classes: tuple[int, ...] = DEFAULT_CLOUD_CLASSES,
     skip_dates: Sequence[str] = (),
     dates: Sequence[str] = (),
+    lr_only: bool = False,
 ) -> ExportResult:
     """Super-resolve Sentinel-2 acquisitions for an AOI (center point +
     edge_size) and write one GeoTIFF per timestep.
@@ -466,6 +469,11 @@ def export_superres_tifs(
     ``dates`` (YYYY-MM-DD): process exactly the acquisitions of these days,
     chosen upstream (see ``list_candidates``); no interval selection, no
     SCL filter, and outputs are named by date as in a timeseries.
+
+    ``lr_only``: no SR, no model; every selected scene is written at its native
+    ``resolution`` as ``lr_<date>_<id>.tif`` (float32 reflectance) next to its
+    SCL band (``..._scl.tif``), for callers that mosaic, co-register and
+    super-resolve the whole AOI themselves (see ``superres.superres_raster``).
     """
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     output_dir = Path(output_dir)
@@ -482,7 +490,7 @@ def export_superres_tifs(
         resolution,
         stac,
         max_cloud_cover,
-        with_scl=max_aoi_cloud is not None and not dates,
+        with_scl=lr_only or (max_aoi_cloud is not None and not dates),
     )
     da, epsg, spectral, cloud_covers = (
         search.da,
@@ -542,12 +550,24 @@ def export_superres_tifs(
             if max_items is not None:
                 print(f"Timeseries: ignoring max_items={max_items}")
 
+    n_time = len(selected)
+    if lr_only:
+        return _export_lr(
+            search,
+            selected,
+            band_names,
+            output_dir,
+            dated_names,
+            aoi_cloud,
+            skipped_bins,
+            overwrite,
+        )
+
     _patch_vae_attention_for_low_vram()
     _patch_swin_for_low_vram()
     loaded_model = mlstac.load(str(model_path))
     model = loaded_model.compiled_model(device=device)
 
-    n_time = len(selected)
     in_edge = loaded_model.item.properties["mlm:input"][0]["input"]["shape"][-1]
     out_edge = loaded_model.item.properties["mlm:output"][0]["result"]["shape"][-1]
     scale = out_edge / in_edge
@@ -615,3 +635,54 @@ def export_superres_tifs(
         )
 
     return ExportResult(scenes=written_paths, skipped_bins=skipped_bins)
+
+
+def _export_lr(
+    search: _Search,
+    selected: Sequence[int],
+    band_names: list[str],
+    output_dir: Path,
+    dated_names: bool,
+    aoi_cloud: dict[int, float],
+    skipped_bins: list[str],
+    overwrite: bool,
+) -> ExportResult:
+    """Write the selected scenes unchanged at their native grid: reflectance
+    (DN / 10000, float32, NaN where the cube has no data) plus SCL (uint8,
+    0 = no data)."""
+    crs = f"EPSG:{search.epsg}"
+    n_time = len(selected)
+    scenes = []
+    for step, i in enumerate(selected, start=1):
+        da_t = search.spectral[i]
+        date = pd.Timestamp(da_t.time.values).date().isoformat()
+        scene_id = str(da_t.id.values)
+        name = f"lr_{date}_{scene_id}" if dated_names else f"lr_{scene_id}"
+        out_path = output_dir / f"{name}.tif"
+        scl_path = output_dir / f"{name}_scl.tif"
+        scene = Scene(
+            path=out_path,
+            cloud_cover=search.cloud_covers[i],
+            datetime=date,
+            aoi_cloud=aoi_cloud.get(i),
+            scl_path=scl_path,
+        )
+        if out_path.exists() and scl_path.exists() and not overwrite:
+            scenes.append(scene)
+            print(f"[{step}/{n_time}] Kept existing {out_path}")
+            continue
+
+        lr = (da_t.compute() / 10_000).astype("float32")
+        lr = lr.drop_vars([c for c in lr.coords if c not in ("band", "y", "x")])
+        lr = lr.rio.write_crs(crs).rio.write_nodata(float("nan"))
+        lr.attrs = {"long_name": band_names}
+        lr.rio.to_raster(out_path)
+
+        scl = search.da.sel(band=SCL_BAND)[i].compute().fillna(0).astype("uint8")
+        scl = scl.drop_vars([c for c in scl.coords if c not in ("y", "x")])
+        scl.attrs = {}
+        scl.rio.write_crs(crs).rio.write_nodata(0).rio.to_raster(scl_path)
+
+        scenes.append(scene)
+        print(f"[{step}/{n_time}] Wrote {out_path} ({date})")
+    return ExportResult(scenes=scenes, skipped_bins=skipped_bins)

@@ -25,7 +25,9 @@ from eo_art.forge3d_pipes.acquire.sentinel_bridge import (
     read_aoi_center,
     read_candidates,
     read_manifest,
+    run_sentinel_coreg,
     run_sentinel_sr,
+    run_sentinel_superres,
 )
 from eo_art.forge3d_pipes.acquire.terrain import (
     fetch_local_dem,
@@ -42,6 +44,7 @@ from eo_art.forge3d_pipes.acquire.zones import (
     ZoneGrid,
     build_vrt,
     export_mosaic,
+    merge_first_valid,
     plan_zones,
 )
 
@@ -57,6 +60,10 @@ ZONES_SUFFIX = "_sr_zones"
 MOSAIC_SUFFIX = "_sr_mosaic.tif"
 ZONES_CACHE_DIRNAME = "zones"
 STEPS_NAME = "steps.json"
+# Zoned timeseries: 10 m tiles, step mosaics and their co-registered versions
+# inside <aoi>_sr_timeseries/; SR outputs cached by input content.
+LR_DIRNAME = "lr"
+SR_CACHE_DIRNAME = "sr_mosaics"
 
 
 @dataclass(frozen=True)
@@ -76,12 +83,17 @@ class SrZonesResult:
 @dataclass(frozen=True)
 class ZoneStepResult:
     step: Step
-    # Zone id -> its timestep GeoTIFF in <aoi>_sr_timeseries/<zone>/.
+    # Zone id -> its 10 m tile in <aoi>_sr_timeseries/lr/<zone>/.
     tiles: dict[str, Path]
-    # <aoi>_sr_timeseries/<aoi>_sr_<date>.vrt, date = earliest acquisition.
-    vrt: Path
-    # Same name as .tif, only with sentinel.zones.mosaic.
-    mosaic: Path | None
+    # The step's 10 m mosaic SR ran on (co-registered with sentinel.coreg);
+    # None if co-registration dropped every part of the step.
+    lr_mosaic: Path | None
+    # <aoi>_sr_timeseries/<aoi>_sr_<date>.tif, date = earliest acquisition;
+    # None like lr_mosaic.
+    sr: Path | None
+    # Acquisition date -> applied (x, y) shift in 10 m pixels, None if the
+    # matcher dropped it; empty without co-registration.
+    shifts: dict[str, tuple[float, float] | None]
 
 
 @dataclass(frozen=True)
@@ -129,6 +141,9 @@ def _cache_key(cfg: AcquireConfig | SrConfig) -> str:
         # Only steers which cached candidates/dates are combined; candidates
         # and SR'd dates stay valid when it changes.
         del payload["sentinel"]["timeseries"]["max_zone_offset_days"]
+        del payload["sentinel"]["timeseries"]["single_date"]
+    # Co-registration runs on the fetched scenes and never changes them.
+    del payload["sentinel"]["coreg"]
     # Same for disabled zones, which leave the single-chip run unchanged.
     if not cfg.sentinel.zones.enabled:
         del payload["sentinel"]["zones"]
@@ -618,28 +633,227 @@ def _reset_zone_timeseries(target: Path, stem: str) -> None:
             frame.unlink()
     for vrt in target.glob(f"{stem}{SR_SUFFIX.removesuffix('.tif')}_*.vrt"):
         vrt.unlink()
+    shutil.rmtree(target / LR_DIRNAME, ignore_errors=True)
     (target / STEPS_NAME).unlink(missing_ok=True)
 
 
-def _step_record(result: ZoneStepResult) -> dict:
-    step = result.step
-    return {
-        "bin": step.bin,
-        "date": step.date,
-        "window": list(step.window) if step.window else None,
-        "spread_days": step.spread_days,
-        "zones": {
-            zone: {
-                "date": pick.date,
-                "cloud": pick.cloud,
-                "outside_days": pick.outside_days,
-            }
-            for zone, pick in step.picks.items()
-        },
-        "empty_zones": step.empty_zones,
-        "vrt": result.vrt.name,
-        "mosaic": result.mosaic.name if result.mosaic else None,
+@dataclass
+class _LrPart:
+    """The 10 m mosaic of one acquisition date of a step, on the full grid."""
+
+    date: str
+    src: Path
+    scl: Path | None
+    # Set by co-registration: the warped copy, or None if dropped.
+    corrected: Path | None = None
+    shift: tuple[float, float] | None = None
+    dropped: bool = False
+
+    def record(self) -> dict:
+        return {
+            "date": self.date,
+            "src": self.src.name,
+            "scl": self.scl.name if self.scl else None,
+        }
+
+
+@dataclass
+class _StepWork:
+    bin: str
+    date: str
+    parts: list[_LrPart]
+    # New steps carry their Step and tiles, kept ones (fill_gaps) their record.
+    step: Step | None = None
+    tiles: dict[str, Path] = field(default_factory=dict)
+    record: dict | None = None
+    lr_mosaic: Path | None = None
+    sr: Path | None = None
+
+
+def _lr_parts(
+    step: Step,
+    fetched: dict[str, dict[str, Scene]],
+    grid: ZoneGrid,
+    lr_dir: Path,
+    stem: str,
+) -> tuple[list[_LrPart], dict[str, Path]]:
+    """10 m mosaics of a step, one per acquisition date, all on the full zone
+    grid (zones of other dates are NaN), plus zone id -> its 10 m tile."""
+    by_date: dict[str, list[str]] = {}
+    for zone_id, pick in step.picks.items():
+        by_date.setdefault(pick.date, []).append(zone_id)
+    multi = len(by_date) > 1
+    parts, tiles = [], {}
+    for date, zone_ids in sorted(by_date.items()):
+        lr_tiles, scl_tiles = [], []
+        for zone_id in zone_ids:
+            scene = fetched.get(zone_id, {}).get(date)
+            if scene is None:
+                print(f"  {step.bin}: {zone_id} has no 10 m scene for {date}")
+                continue
+            dst = lr_dir / zone_id / f"{stem}_lr_{date}.tif"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(scene.path, dst)
+            tiles[zone_id] = dst
+            lr_tiles.append(dst)
+            if scene.scl_path is not None:
+                scl_dst = dst.with_name(f"{dst.stem}_scl.tif")
+                shutil.copy2(scene.scl_path, scl_dst)
+                scl_tiles.append(scl_dst)
+        if not lr_tiles:
+            continue
+        # A date can recur as a relaxed pick of another step, with other zones.
+        name = f"{stem}_lr_{step.date}_part_{date}" if multi else f"{stem}_lr_{date}"
+        src = export_mosaic(
+            build_vrt(lr_tiles, lr_dir / f"{name}.vrt", bounds=grid.bounds),
+            lr_dir / f"{name}.tif",
+        )
+        scl = (
+            export_mosaic(
+                build_vrt(scl_tiles, lr_dir / f"{name}_scl.vrt", bounds=grid.bounds),
+                lr_dir / f"{name}_scl.tif",
+            )
+            if len(scl_tiles) == len(lr_tiles)
+            else None
+        )
+        parts.append(_LrPart(date=date, src=src, scl=scl))
+    return parts, tiles
+
+
+def _kept_work(kept: list[dict], lr_dir: Path) -> list[_StepWork]:
+    """Steps of an earlier run (fill_gaps) whose 10 m parts are still there,
+    so they are co-registered and super-resolved together with the new ones."""
+    work = []
+    for record in kept:
+        parts = [
+            _LrPart(
+                date=part["date"],
+                src=lr_dir / part["src"],
+                scl=lr_dir / part["scl"] if part.get("scl") else None,
+            )
+            for part in record.get("lr_parts", [])
+        ]
+        if parts and all(p.src.exists() for p in parts):
+            work.append(_StepWork(record["bin"], record["date"], parts, record=record))
+        else:
+            print(
+                f"  {record['bin']}: no 10 m mosaic from the earlier run, its SR "
+                "step is kept as is (not co-registered)"
+            )
+    return work
+
+
+def _coregister_parts(cfg: SrConfig, parts: list[_LrPart], lr_dir: Path) -> None:
+    """AROSICS over all parts of the series (sentinel_sr, stac2cube engine);
+    fills each part's ``corrected``/``shift`` or marks it ``dropped``."""
+    jobs = [
+        {
+            "src": str(part.src),
+            "dst": str(part.src.with_name(f"{part.src.stem}_cr.tif")),
+            "date": part.date,
+            "scl": str(part.scl) if part.scl else None,
+        }
+        for part in parts
+    ]
+    print(
+        f"Co-registration: {len(parts)} 10 m mosaic(s), "
+        f"anchor {cfg.sentinel.coreg.anchor}"
+    )
+    report = run_sentinel_coreg(
+        cfg.sentinel, cfg.sentinel_sr_dir, jobs, lr_dir / "coreg_jobs.json"
+    )
+    by_src = {entry["src"]: entry for entry in report}
+    for part in parts:
+        entry = by_src.get(str(part.src))
+        if entry is None or entry["dst"] is None:
+            part.dropped = True
+            print(f"  {part.date}: dropped by co-registration (see the log above)")
+            continue
+        part.corrected = Path(entry["dst"])
+        part.shift = (entry["shift_x_px"], entry["shift_y_px"])
+
+
+def _step_input(work: _StepWork, lr_dir: Path, stem: str) -> Path | None:
+    """The 10 m raster SR runs on: the (co-registered) part, or the parts
+    merged first-valid; None if every part was dropped."""
+    inputs = [p.corrected or p.src for p in work.parts if not p.dropped]
+    if not inputs:
+        return None
+    if len(inputs) == 1:
+        return inputs[0]
+    return merge_first_valid(inputs, lr_dir / f"{stem}_lr_{work.date}_merged.tif")
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+
+def _superres_steps(
+    cfg: SrConfig,
+    work: list[_StepWork],
+    sr_cache: Path,
+    target: Path,
+    stem: str,
+    use_cache: bool,
+) -> None:
+    """SR of every step's 10 m mosaic as one image (overlapping patches, no
+    chip seams). Results are cached by input content, so an unchanged mosaic
+    (same scenes, same shift) is never super-resolved twice."""
+    jobs, todo = [], []
+    for w in work:
+        if w.lr_mosaic is None:
+            continue
+        cached = sr_cache / f"{stem}_sr_{w.date}_{_digest(w.lr_mosaic)}.tif"
+        jobs.append({"src": str(w.lr_mosaic), "dst": str(cached)})
+        todo.append((w, cached))
+    if not jobs:
+        return
+    run_sentinel_superres(
+        cfg.sentinel,
+        cfg.sentinel_sr_dir,
+        jobs,
+        sr_cache / "superres_jobs.json",
+        overwrite=not use_cache,
+    )
+    for w, cached in todo:
+        w.sr = target / f"{stem}_sr_{w.date}.tif"
+        shutil.copy2(cached, w.sr)
+
+
+def _work_record(w: _StepWork, lr_dir: Path) -> dict:
+    if w.record is not None:
+        record = dict(w.record)
+    else:
+        assert w.step is not None
+        step = w.step
+        record = {
+            "bin": step.bin,
+            "date": step.date,
+            "window": list(step.window) if step.window else None,
+            "spread_days": step.spread_days,
+            "zones": {
+                zone: {
+                    "date": pick.date,
+                    "cloud": pick.cloud,
+                    "outside_days": pick.outside_days,
+                }
+                for zone, pick in step.picks.items()
+            },
+            "empty_zones": step.empty_zones,
+        }
+    record.pop("vrt", None)
+    record.pop("mosaic", None)
+    record["lr_parts"] = [p.record() for p in w.parts]
+    record["coreg"] = {
+        p.date: (list(p.shift) if p.shift else None)
+        for p in w.parts
+        if p.shift is not None or p.dropped
     }
+    record["lr_mosaic"] = (
+        w.lr_mosaic.relative_to(lr_dir.parent).as_posix() if w.lr_mosaic else None
+    )
+    record["sr"] = w.sr.name if w.sr else record.get("sr")
+    return record
 
 
 def run_sr_timeseries_zones(
@@ -650,17 +864,22 @@ def run_sr_timeseries_zones(
 ) -> ZoneTimeseriesResult:
     """A timeseries over all zones with one shared step per interval.
 
-    Pass 1 lists every zone's candidate scenes (no SR). Per interval the
-    zones' acquisitions are then chosen together: within
-    ``timeseries.max_zone_offset_days`` of each other where possible (see
-    ``zone_steps``), and every step is reported with its actual spread.
-    Pass 2 super-resolves exactly the chosen dates zone by zone.
+    1. Every zone's candidate scenes are listed (no pixels). Per interval
+       the zones' acquisitions are chosen together: one day for all zones
+       (``timeseries.single_date``), within ``max_zone_offset_days`` of each
+       other, or each zone its own (see ``zone_steps``).
+    2. The chosen dates are fetched at 10 m (plus SCL), zone by zone.
+    3. Per step and acquisition date the zone tiles become one 10 m mosaic
+       on the full zone grid (``lr/``).
+    4. With ``sentinel.coreg`` (and at least two mosaics) all mosaics are
+       co-registered as one series with AROSICS, at 10 m, before any SR.
+    5. Each step's mosaic is super-resolved as one image with overlapping
+       patches, so zone borders leave no seam:
+       ``<aoi>_sr_timeseries/<aoi>_sr_<date>.tif`` (date = the step's earliest
+       acquisition), a regular timeseries folder.
 
-    Writes ``<aoi>_sr_timeseries/<zone>/<aoi>_sr_<date>.tif`` per zone, a VRT
-    per step ``<aoi>_sr_timeseries/<aoi>_sr_<date>.vrt`` (date = the step's
-    earliest acquisition; with ``zones.mosaic`` also as GeoTIFF, which makes
-    the folder a regular timeseries of mosaics), and ``steps.json`` with the
-    dates, windows and offsets of every step. ``max_items`` is ignored.
+    ``steps.json`` records dates, windows, offsets, the 10 m parts and the
+    applied shifts of every step. ``max_items`` is ignored.
     """
     timeseries = cfg.sentinel.timeseries
     if not timeseries.enabled:
@@ -670,8 +889,10 @@ def run_sr_timeseries_zones(
     out_dir = Path(out_dir)
     stem = Path(cfg.aoi_path).stem
     grid = _plan(cfg)
-    cache_dir = out_dir / CACHE_DIRNAME / _cache_key(cfg) / ZONES_CACHE_DIRNAME
+    config_cache = out_dir / CACHE_DIRNAME / _cache_key(cfg)
+    cache_dir = config_cache / ZONES_CACHE_DIRNAME
     target = _results_dir(out_dir, run_dir) / timeseries_dirname(cfg.aoi_path)
+    lr_dir = target / LR_DIRNAME
     steps_path = target / STEPS_NAME
 
     candidates, bins = _zone_candidates(cfg, grid, cache_dir, use_cache)
@@ -681,77 +902,88 @@ def run_sr_timeseries_zones(
         filled = {record["bin"] for record in kept}
         bins = [b for b in bins if b not in filled]
         print(f"Timeseries: {len(filled)} step(s) already done, {len(bins)} open")
-    steps, skipped = coordinate_steps(candidates, bins, timeseries.max_zone_offset_days)
+    steps, skipped = coordinate_steps(
+        candidates,
+        bins,
+        timeseries.max_zone_offset_days,
+        single_date=timeseries.single_date,
+    )
     if not steps and not kept:
         raise RuntimeError(
             f"sentinel_sr found no scenes for any of the {len(grid.zones)} "
             f"zone(s) of aoi={cfg.aoi_path!r} in "
             f"[{cfg.sentinel.start_date}, {cfg.sentinel.end_date}]"
+            + (" on a day shared by all zones" if timeseries.single_date else "")
         )
     print(f"Timeseries: {len(steps)} step(s), {len(skipped)} empty interval(s)")
     for step in steps:
         print("  " + describe_step(step, timeseries.max_zone_offset_days))
 
-    # Pass 2: SR exactly the chosen dates, zone by zone.
-    written: dict[str, dict[str, Path]] = {}
+    # Pass 2: fetch exactly the chosen dates at 10 m, zone by zone.
+    fetched: dict[str, dict[str, Scene]] = {}
     n = len(grid.zones)
     for k, zone in enumerate(grid.zones, start=1):
         dates = sorted({s.picks[zone.id].date for s in steps if zone.id in s.picks})
         if not dates:
             continue
-        print(f"[zone {k}/{n}] {zone.id}: SR of {len(dates)} date(s)")
+        print(f"[zone {k}/{n}] {zone.id}: 10 m scenes of {len(dates)} date(s)")
         scenes = run_sentinel_sr(
             cfg.sentinel,
             cfg.sentinel_sr_dir,
             zone.lat,
             zone.lon,
-            cache_dir / zone.id / "sentinel",
+            cache_dir / zone.id / LR_DIRNAME,
             overwrite=not use_cache,
             dates=dates,
+            lr_only=True,
         )
-        written[zone.id] = {
-            scene.datetime: scene.path for scene in scenes if scene.datetime
-        }
+        fetched[zone.id] = {s.datetime: s for s in scenes if s.datetime}
 
     if not timeseries.fill_gaps:
         _reset_zone_timeseries(target, stem)
     target.mkdir(parents=True, exist_ok=True)
-    results = []
+    work = _kept_work(kept, lr_dir)
+    kept_bins = {w.bin for w in work}
     for step in steps:
-        tiles: dict[str, Path] = {}
-        for zone_id, pick in step.picks.items():
-            src = written.get(zone_id, {}).get(pick.date)
-            if src is None:
-                print(f"  {step.bin}: {zone_id} has no SR output for {pick.date}")
-                continue
-            dst = target / zone_id / f"{stem}_sr_{pick.date}.tif"
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            tiles[zone_id] = dst
-        if not tiles:
-            continue
-        name = f"{stem}_sr_{step.date}"
-        vrt = build_vrt(list(tiles.values()), target / f"{name}.vrt")
-        mosaic = (
-            export_mosaic(vrt, target / f"{name}.tif")
-            if cfg.sentinel.zones.mosaic
-            else None
-        )
-        results.append(ZoneStepResult(step=step, tiles=tiles, vrt=vrt, mosaic=mosaic))
+        parts, tiles = _lr_parts(step, fetched, grid, lr_dir, stem)
+        if parts:
+            work.append(_StepWork(step.bin, step.date, parts, step=step, tiles=tiles))
+    work.sort(key=lambda w: w.bin)
 
-    records = sorted(
-        [*kept, *(_step_record(r) for r in results)], key=lambda r: r["bin"]
-    )
+    all_parts = [p for w in work for p in w.parts]
+    if cfg.sentinel.coreg.enabled and len(all_parts) >= 2:
+        _coregister_parts(cfg, all_parts, lr_dir)
+    for w in work:
+        w.lr_mosaic = _step_input(w, lr_dir, stem)
+    _superres_steps(cfg, work, config_cache / SR_CACHE_DIRNAME, target, stem, use_cache)
+
+    records = {r["bin"]: r for r in kept}
+    records.update({w.bin: _work_record(w, lr_dir) for w in work})
     steps_path.write_text(
         json.dumps(
             {
                 "max_zone_offset_days": timeseries.max_zone_offset_days,
-                "steps": records,
+                "single_date": timeseries.single_date,
+                "coreg": asdict(cfg.sentinel.coreg),
+                "steps": [records[b] for b in sorted(records)],
                 "skipped_bins": skipped,
             },
             indent=2,
         )
     )
+    results = [
+        ZoneStepResult(
+            step=w.step,
+            tiles=w.tiles,
+            lr_mosaic=w.lr_mosaic,
+            sr=w.sr,
+            shifts={
+                p.date: p.shift for p in w.parts if p.shift is not None or p.dropped
+            },
+        )
+        for w in work
+        if w.step is not None and w.bin not in kept_bins
+    ]
     return ZoneTimeseriesResult(out_dir=target, steps=results, skipped_bins=skipped)
 
 

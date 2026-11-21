@@ -142,6 +142,79 @@ RENDER_HELP: dict[str, str] = {
     "export.video.quality": "Encoding quality, 1 (small) to 10 (best).",
 }
 
+# Acquire config (shared by acquire and eo-art-sr).
+ACQUIRE_HELP: dict[str, str] = {
+    "aoi_path": "AOI vector file (GeoPackage/GeoJSON), relative to the project folder.",
+    "ee_project": "Google Earth Engine project for the DEM download; not needed "
+    "with dem.source = local.",
+    "out_dir": "Output folder; every run writes into out/runs/<time>-<kind>/, "
+    "the cache stays in out/_acquire/.",
+    "sentinel_sr_dir": "Local checkout of the sentinel_sr project (runs in its "
+    "own venv with torch).",
+    # sentinel
+    "sentinel.start_date": "First acquisition date searched (YYYY-MM-DD).",
+    "sentinel.end_date": "Last acquisition date searched (YYYY-MM-DD).",
+    "sentinel.model_path": "Folder of the SR model (mlstac, e.g. LDSRS2-SEN2SR).",
+    "sentinel.collection": "STAC collection, normally sentinel-2-l2a.",
+    "sentinel.edge_size": "Chip size in pixels: without zones the one chip around "
+    "the AOI centre, with zones the size of each zone.",
+    "sentinel.resolution": "Input pixel size in metres (10 m; SR makes 2.5 m).",
+    "sentinel.stac": "STAC API to search (default: Planetary Computer).",
+    "sentinel.max_items": "Most scenes to super-resolve (per zone with zones); "
+    "ignored for timeseries.",
+    "sentinel.max_cloud_cover": "Drop scenes whose whole tile is cloudier than "
+    "this percent (eo:cloud_cover, before download).",
+    "sentinel.max_aoi_cloud": "Drop scenes with more than this percent of AOI "
+    "pixels in the SCL cloud classes; unset = no check.",
+    "sentinel.reference_index": "Which scene acquire carries forward (by "
+    "position); unset = the least cloudy.",
+    # timeseries
+    "sentinel.timeseries.enabled": "eo-art-sr only: one scene per interval "
+    "instead of a single reference scene.",
+    "sentinel.timeseries.interval": "Length of one interval: day, week, month or year.",
+    "sentinel.timeseries.every": "One scene every N intervals (e.g. week + 2 = "
+    "biweekly).",
+    "sentinel.timeseries.fill_gaps": "Continue the latest SR run's series instead "
+    "of rebuilding it: done intervals are kept, only empty ones are searched "
+    "again (e.g. after a longer date range or looser cloud limits).",
+    "sentinel.timeseries.max_zone_offset_days": "With zones: the zones' dates of "
+    "one step may lie at most this many days apart; unset = each zone picks "
+    "its own least cloudy scene.",
+    "sentinel.timeseries.single_date": "With zones: each step is one acquisition "
+    "for the whole AOI; intervals without a day shared by all zones are "
+    "skipped. Excludes max_zone_offset_days.",
+    # zones
+    "sentinel.zones.enabled": "Cover a large AOI with a grid of edge_size chips "
+    "instead of one chip around its centre.",
+    "sentinel.zones.clip_to_aoi": "Skip grid cells that don't touch an irregular "
+    "AOI; off = the full rectangle.",
+    "sentinel.zones.mosaic": "Without timeseries: also write the zone tiles as one "
+    "GeoTIFF (<aoi>_sr_mosaic.tif).",
+    # coreg
+    "sentinel.coreg.enabled": "Zoned timeseries: align the steps with AROSICS at "
+    "10 m before SR; unmatchable steps are dropped.",
+    "sentinel.coreg.anchor": "Reference step: auto (most textured, low cloud, mid "
+    "series), first, composite or a date YYYY-MM-DD.",
+    "sentinel.coreg.grid_size": "Matching windows per step: up to grid_size² + 1; "
+    "more = robust but slower.",
+    # dem / dtm / align
+    "dem.source": "Where the elevation comes from: copernicus, fabdem (no trees "
+    "and buildings), srtm (Earth Engine) or local.",
+    "dem.scale": "Download resolution in metres for Earth Engine sources.",
+    "dem.path": "Local DEM GeoTIFF (e.g. 1 m LiDAR DGM); only with dem.source = local.",
+    "dtm.apply_erosion": "Run a thermal erosion simulation over the DTM (softer, "
+    "more natural slopes).",
+    "dtm.radius": "guided_upsample: filter window radius in optical pixels; larger "
+    "= smoother transfer of optical edges.",
+    "dtm.eps": "guided_upsample: filter regularisation; larger = fewer optical "
+    "details in the DTM.",
+    "dtm.band": "guided_upsample: optical band (1-based) used as guide; unset = "
+    "mean of all bands.",
+    "dtm.mode": "guided_upsample: DEM refined onto the optical grid (coarse DEMs). "
+    "native: optical aligned onto the DEM grid (high-res local DEMs).",
+    "align.resampling": "Resampling used to put the optical raster onto the DTM grid.",
+}
+
 # Fields of one entry in ``overlays:`` (its prepare chain has its own editor).
 OVERLAY_HELP: dict[str, str] = {
     "name": "Label of this overlay; only used in logs and the preview.",

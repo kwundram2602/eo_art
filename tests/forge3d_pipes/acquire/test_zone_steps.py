@@ -109,3 +109,50 @@ def test_missing_cloud_cover_ranks_last():
     )
 
     assert steps[0].picks["z00_00"].date == "2024-01-20"
+
+
+def test_single_date_takes_the_least_cloudy_day_shared_by_all_zones():
+    steps, skipped = coordinate_steps(
+        {
+            "z00_00": [
+                _c("2024-01-03", 5.0),
+                _c("2024-01-13", 1.0),
+                _c("2024-01-28", 0.0),
+            ],
+            "z00_01": [_c("2024-01-03", 2.0), _c("2024-01-13", 3.0)],
+            "z01_00": [_c("2024-01-03", 4.0), _c("2024-01-13", 1.0)],
+        },
+        BINS,
+        None,
+        single_date=True,
+    )
+
+    (step,) = steps
+    # 01-13: mean (1 + 3 + 1) / 3 beats 01-03 (5 + 2 + 4) / 3; 01-28 lacks zones.
+    assert {p.date for p in step.picks.values()} == {"2024-01-13"}
+    assert step.spread_days == 0 and step.window is None and not step.relaxed
+    assert skipped == ["2024-02-01"]
+
+
+def test_single_date_skips_intervals_without_a_shared_day():
+    steps, skipped = coordinate_steps(
+        {
+            "z00_00": [_c("2024-01-03", 1.0), _c("2024-02-05", 1.0, "2024-02-01")],
+            "z00_01": [_c("2024-01-08", 1.0), _c("2024-02-05", 2.0, "2024-02-01")],
+            # No candidate at all in January: no full-AOI acquisition either.
+            "z01_00": [_c("2024-02-05", 3.0, "2024-02-01")],
+        },
+        BINS,
+        None,
+        single_date=True,
+    )
+
+    assert [s.bin for s in steps] == ["2024-02-01"]
+    assert skipped == ["2024-01-01"]
+
+
+def test_single_date_excludes_an_offset():
+    import pytest
+
+    with pytest.raises(ValueError, match="exclude"):
+        coordinate_steps({}, BINS, 14, single_date=True)

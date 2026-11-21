@@ -1,26 +1,35 @@
-"""Argparse wrapper over ``rgbn.export_superres_tifs``, writing a manifest."""
+"""Argparse wrapper over sentinel_sr, writing a manifest.
+
+Modes: per-chip SR (default), ``--lr-only`` (fetch without SR),
+``--candidates-only``, and the two file-based steps of the whole-AOI path,
+``--coreg-jobs`` (AROSICS over LR rasters) and ``--superres-jobs`` (SR of
+whole rasters with overlapping patches).
+"""
 
 import argparse
 import json
 from collections.abc import Sequence
 from pathlib import Path
 
+from sentinel_sr import coreg, superres
 from sentinel_sr.clouds import DEFAULT_CLOUD_CLASSES
 from sentinel_sr.rgbn import BANDS_10, export_superres_tifs, list_candidates
 from sentinel_sr.timeseries import FREQUENCIES
 
 MANIFEST_NAME = "manifest.json"
 CANDIDATES_NAME = "candidates.json"
+# Required for the scene modes, not for the --*-jobs modes.
+_SCENE_ARGS = ("lat", "lon", "start_date", "end_date", "out")
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="eo-art-sentinel-sr")
-    parser.add_argument("--lat", type=float, required=True)
-    parser.add_argument("--lon", type=float, required=True)
-    parser.add_argument("--start-date", required=True)
-    parser.add_argument("--end-date", required=True)
-    parser.add_argument("--model-path", required=True)
-    parser.add_argument("--out", required=True, help="output directory")
+    parser.add_argument("--lat", type=float)
+    parser.add_argument("--lon", type=float)
+    parser.add_argument("--start-date")
+    parser.add_argument("--end-date")
+    parser.add_argument("--model-path")
+    parser.add_argument("--out", help="output directory")
     parser.add_argument("--collection", default="sentinel-2-l2a")
     parser.add_argument(
         "--bands", default=",".join(BANDS_10), help="comma-separated band names"
@@ -70,6 +79,30 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"write {CANDIDATES_NAME} with every scene that passes the cloud "
         "checks (and its interval), without running SR",
+    )
+    parser.add_argument(
+        "--lr-only",
+        action="store_true",
+        help="write the selected scenes at native resolution (plus SCL) without SR",
+    )
+    parser.add_argument(
+        "--coreg-jobs",
+        help='JSON {"jobs": [{"src", "dst", "date", "scl"}]}: co-register the '
+        "LR rasters as one series (AROSICS), report next to it as coreg.json",
+    )
+    parser.add_argument(
+        "--anchor",
+        default="auto",
+        help="coreg: reference scene, auto | first | composite | YYYY-MM-DD",
+    )
+    parser.add_argument("--grid-size", type=int, default=7, help="coreg windows")
+    parser.add_argument(
+        "--superres-jobs",
+        help='JSON {"jobs": [{"src", "dst"}]}: super-resolve whole rasters '
+        "with overlapping patches (needs --model-path)",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=1, help="SR patches per model call"
     )
     parser.add_argument(
         "--overwrite",
@@ -124,8 +157,43 @@ def _write_candidates(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_coreg(args: argparse.Namespace) -> int:
+    jobs_path = Path(args.coreg_jobs)
+    results = coreg.coregister_jobs(
+        coreg.read_jobs(jobs_path),
+        anchor=args.anchor,
+        grid_size=args.grid_size,
+        scl_classes=tuple(int(c) for c in args.scl_classes.split(",")),
+    )
+    report = coreg.write_report(results, jobs_path.parent / "coreg.json")
+    print(f"Wrote {report}")
+    return 0
+
+
+def _run_superres(args: argparse.Namespace) -> int:
+    jobs = json.loads(Path(args.superres_jobs).read_text())["jobs"]
+    superres.superres_jobs(
+        jobs, args.model_path, batch_size=args.batch_size, overwrite=args.overwrite
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.coreg_jobs:
+        return _run_coreg(args)
+    if args.superres_jobs:
+        if not args.model_path:
+            parser.error("--superres-jobs needs --model-path")
+        return _run_superres(args)
+    missing = [
+        f"--{a.replace('_', '-')}" for a in _SCENE_ARGS if getattr(args, a) is None
+    ]
+    if not (args.candidates_only or args.lr_only) and args.model_path is None:
+        missing.append("--model-path")
+    if missing:
+        parser.error(f"the following arguments are required: {', '.join(missing)}")
     if args.candidates_only:
         return _write_candidates(args)
 
@@ -150,6 +218,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         scl_classes=tuple(int(c) for c in args.scl_classes.split(",")),
         skip_dates=_split(args.skip_dates),
         dates=_split(args.dates),
+        lr_only=args.lr_only,
     )
 
     manifest_path = Path(args.out) / MANIFEST_NAME
@@ -162,6 +231,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "cloud_cover": scene.cloud_cover,
                         "datetime": scene.datetime,
                         "aoi_cloud": scene.aoi_cloud,
+                        **(
+                            {"scl_path": str(scene.scl_path)}
+                            if scene.scl_path is not None
+                            else {}
+                        ),
                     }
                     for scene in result.scenes
                 ],

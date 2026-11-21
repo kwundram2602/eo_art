@@ -20,6 +20,8 @@ from eo_art.forge3d_pipes.acquire.schema import Sentinel
 
 MANIFEST_NAME = "manifest.json"
 CANDIDATES_NAME = "candidates.json"
+# sentinel_sr writes it next to the jobs file of --coreg-jobs.
+COREG_REPORT_NAME = "coreg.json"
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,8 @@ class Scene:
     datetime: str | None = None
     # Percent of AOI pixels in the SCL cloud classes (None: check disabled).
     aoi_cloud: float | None = None
+    # lr_only runs: the scene's SCL band (for the co-registration cloud mask).
+    scl_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,7 @@ def read_manifest(out_dir: str | Path) -> Manifest:
                 cloud_cover=scene["cloud_cover"],
                 datetime=scene.get("datetime"),
                 aoi_cloud=scene.get("aoi_cloud"),
+                scl_path=Path(scene["scl_path"]) if scene.get("scl_path") else None,
             )
             for scene in manifest["scenes"]
         ],
@@ -167,6 +172,7 @@ def run_sentinel_sr(
     overwrite: bool = False,
     skip_dates: Sequence[str] = (),
     dates: Sequence[str] = (),
+    lr_only: bool = False,
 ) -> list[Scene]:
     """Run the sentinel_sr subprocess and return the written GeoTIFF paths.
 
@@ -174,7 +180,8 @@ def run_sentinel_sr(
     run) unless ``overwrite``. ``cfg.timeseries`` switches it to one scene per
     interval; intervals containing one of ``skip_dates`` get none. ``dates``
     instead names the acquisitions to super-resolve directly (chosen from
-    ``list_sentinel_candidates``).
+    ``list_sentinel_candidates``). ``lr_only`` fetches the scenes at native
+    resolution (plus SCL) without SR.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -187,11 +194,74 @@ def run_sentinel_sr(
         command += ["--skip-dates", ",".join(skip_dates)]
     if dates:
         command += ["--dates", ",".join(dates)]
+    if lr_only:
+        command.append("--lr-only")
     if overwrite:
         command.append("--overwrite")
 
     subprocess.run(command, check=True)
     return read_manifest(out_dir).scenes
+
+
+def _jobs_command(
+    sentinel_sr_dir: str | Path, jobs_flag: str, jobs_path: Path
+) -> list[str]:
+    return [
+        "uv",
+        "run",
+        "--project",
+        str(sentinel_sr_dir),
+        "eo-art-sentinel-sr",
+        jobs_flag,
+        str(jobs_path),
+    ]
+
+
+def run_sentinel_coreg(
+    cfg: Sentinel,
+    sentinel_sr_dir: str | Path,
+    jobs: Sequence[dict],
+    jobs_path: str | Path,
+) -> list[dict]:
+    """Co-register LR rasters (``{"src", "dst", "date", "scl"}`` each) as one
+    series in sentinel_sr (AROSICS via stac2cube) and return its report: one
+    entry per job with ``dst`` None for dropped scenes and the applied
+    ``shift_x_px``/``shift_y_px``."""
+    jobs_path = Path(jobs_path)
+    jobs_path.parent.mkdir(parents=True, exist_ok=True)
+    jobs_path.write_text(json.dumps({"jobs": list(jobs)}, indent=2))
+    command = _jobs_command(sentinel_sr_dir, "--coreg-jobs", jobs_path) + [
+        "--anchor",
+        cfg.coreg.anchor,
+        "--grid-size",
+        str(cfg.coreg.grid_size),
+        "--scl-classes",
+        ",".join(str(c) for c in cfg.scl_cloud_classes),
+    ]
+    subprocess.run(command, check=True)
+    return json.loads((jobs_path.parent / COREG_REPORT_NAME).read_text())["scenes"]
+
+
+def run_sentinel_superres(
+    cfg: Sentinel,
+    sentinel_sr_dir: str | Path,
+    jobs: Sequence[dict],
+    jobs_path: str | Path,
+    overwrite: bool = False,
+) -> None:
+    """Super-resolve whole rasters (``{"src", "dst"}`` each) in sentinel_sr
+    with overlapping patches and edge padding, so no chip seams appear.
+    Existing ``dst`` files are kept unless ``overwrite``."""
+    jobs_path = Path(jobs_path)
+    jobs_path.parent.mkdir(parents=True, exist_ok=True)
+    jobs_path.write_text(json.dumps({"jobs": list(jobs)}, indent=2))
+    command = _jobs_command(sentinel_sr_dir, "--superres-jobs", jobs_path) + [
+        "--model-path",
+        cfg.model_path,
+    ]
+    if overwrite:
+        command.append("--overwrite")
+    subprocess.run(command, check=True)
 
 
 def list_sentinel_candidates(

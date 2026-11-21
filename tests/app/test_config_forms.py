@@ -160,6 +160,15 @@ def test_render_help_covers_every_form_field_and_nothing_else():
     assert set(RENDER_HELP) == form_paths
 
 
+def test_acquire_help_covers_every_form_field_and_nothing_else():
+    from eo_art.app.field_help import ACQUIRE_HELP
+    from eo_art.forge3d_pipes.acquire.schema import AcquireConfig
+
+    form_paths = {s.path for s in iter_fields(AcquireConfig) if s.kind != "complex"}
+
+    assert set(ACQUIRE_HELP) == form_paths
+
+
 def _node(nodes, path):
     for node in nodes:
         if node.path == path:

@@ -29,13 +29,20 @@ sentinel:
   #   enabled: true
   #   clip_to_aoi: true   # skip grid cells outside an irregular AOI
   #   mosaic: false       # also write <aoi>_sr_mosaic.tif
-  # Zones + timeseries: one shared step per interval, the zones' dates at most
-  # max_zone_offset_days apart where possible (steps.json reports the actual
-  # spread); with zones.mosaic each step is also written as one GeoTIFF.
+  # Zones + timeseries: one shared step per interval. The zones are fetched at
+  # 10 m, mosaicked per step, co-registered (coreg) and super-resolved as one
+  # image, so zone borders leave no seam; each step is <aoi>_sr_<date>.tif.
+  # Either the zones' dates at most max_zone_offset_days apart where possible
+  # (steps.json reports the actual spread), or single_date: one acquisition
+  # for the whole AOI (intervals without a day shared by all zones are skipped).
   # timeseries:
   #   enabled: true
   #   interval: month
-  #   max_zone_offset_days: 14
+  #   max_zone_offset_days: 14   # or: single_date: true
+  # coreg:                       # AROSICS at 10 m before SR (stac2cube engine)
+  #   enabled: true
+  #   anchor: auto               # auto | first | composite | YYYY-MM-DD
+  #   grid_size: 7               # up to grid_size^2 + 1 windows per step
 
 dem:
   # FABDEM is Copernicus GLO-30 with forest canopy and buildings removed --

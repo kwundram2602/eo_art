@@ -187,13 +187,17 @@ def plan_zones(
     )
 
 
-def build_vrt(tiles: Sequence[str | Path], dst: str | Path) -> Path:
+def build_vrt(
+    tiles: Sequence[str | Path], dst: str | Path, bounds: Bounds | None = None
+) -> Path:
     """Write a VRT mosaic of ``tiles`` at ``dst``.
 
     The tiles must share CRS, pixel size, band count and data type, as zone
     tiles do; nothing is resampled. Tiles are referenced relative to the VRT,
     so the folder can be moved. Areas without a tile are nodata (NaN for
-    float data without a nodata value of its own).
+    float data without a nodata value of its own). ``bounds`` (minx, miny,
+    maxx, maxy) fixes the extent, e.g. the whole zone grid, so mosaics of
+    different zone subsets share one grid; default: the tiles' union.
     """
     dst = Path(dst)
     if not tiles:
@@ -226,10 +230,13 @@ def build_vrt(tiles: Sequence[str | Path], dst: str | Path) -> Path:
                 )
 
     xres, yres = first.res
-    left = min(m.bounds.left for m in metas)
-    top = max(m.bounds.top for m in metas)
-    right = max(m.bounds.right for m in metas)
-    bottom = min(m.bounds.bottom for m in metas)
+    if bounds is not None:
+        left, bottom, right, top = bounds
+    else:
+        left = min(m.bounds.left for m in metas)
+        top = max(m.bounds.top for m in metas)
+        right = max(m.bounds.right for m in metas)
+        bottom = min(m.bounds.bottom for m in metas)
     width = round((right - left) / xres)
     height = round((top - bottom) / yres)
 
@@ -278,6 +285,40 @@ def build_vrt(tiles: Sequence[str | Path], dst: str | Path) -> Path:
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     ET.ElementTree(root).write(dst, encoding="unicode")
+    return dst
+
+
+def merge_first_valid(parts: Sequence[str | Path], dst: str | Path) -> Path:
+    """Merge rasters on one grid into ``dst``: per pixel the first part with
+    data in all bands wins (NaN = no data). Used to put the co-registered
+    date groups of a step back together."""
+    if not parts:
+        raise ValueError("merge_first_valid needs at least one raster")
+    dst = Path(dst)
+    with rasterio.open(parts[0]) as src:
+        profile = src.profile
+        descriptions = src.descriptions
+        out = src.read().astype("float32")
+    for part in parts[1:]:
+        with rasterio.open(part) as src:
+            if (src.transform, src.width, src.height) != (
+                profile["transform"],
+                profile["width"],
+                profile["height"],
+            ):
+                raise ValueError(f"{part} is not on the grid of {parts[0]}")
+            data = src.read().astype("float32")
+        hole = np.isnan(out).any(axis=0)
+        out[:, hole] = data[:, hole]
+    profile.update(
+        driver="GTiff", dtype="float32", nodata=float("nan"), compress="deflate"
+    )
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(dst, "w", **profile) as out_ds:
+        out_ds.write(out)
+        for band, description in enumerate(descriptions, start=1):
+            if description:
+                out_ds.set_band_description(band, description)
     return dst
 
 

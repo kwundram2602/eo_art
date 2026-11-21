@@ -36,7 +36,7 @@ from eo_art.app.configs import (
     validate_render,
     validate_sr,
 )
-from eo_art.app.field_help import RENDER_HELP
+from eo_art.app.field_help import ACQUIRE_HELP, RENDER_HELP
 from eo_art.app.overlay_preview import OverlayPreview, build_previews
 from eo_art.app.projects import Project, validate_name
 from eo_art.app.results import project_tifs
@@ -139,7 +139,7 @@ def ConfigForm(
     on_open_overlays: Any = None,
 ) -> ft.Control:
     schema = schema_for(kind)
-    help_texts = RENDER_HELP if kind is ConfigKind.render else {}
+    help_texts = RENDER_HELP if kind is ConfigKind.render else ACQUIRE_HELP
     try:
         file_cfg = load_file(path)
         merged = merged_with_defaults(schema, file_cfg)

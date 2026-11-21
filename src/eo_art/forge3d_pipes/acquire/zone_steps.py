@@ -7,6 +7,10 @@ scene. Here the zones' candidates are compared per interval instead: the
 window of ``max_offset_days`` that gives the most zones a scene, at the
 lowest mean cloud, wins. A zone with no scene in that window takes its scene
 nearest to it, and the step records by how many days it lies outside.
+
+``single_date`` is the strict alternative: a step only exists on a day on
+which every zone has a scene, so the whole AOI comes from one acquisition
+(no date seams between zones, one shift per step for co-registration).
 """
 
 from dataclasses import dataclass
@@ -128,18 +132,41 @@ def _coordinate_bin(
     return picks, (lo.isoformat(), hi.isoformat())
 
 
+def _common_date(by_zone: dict[str, list[Candidate]]) -> dict[str, ZonePick] | None:
+    """Picks on the least cloudy day every zone has a scene on (mean over
+    the zones, ties to the earlier day), or None without such a day."""
+    per_zone = [{c.datetime: c for c in cands} for cands in by_zone.values()]
+    shared = set(per_zone[0]).intersection(*per_zone[1:])
+    if not shared:
+        return None
+
+    def key(day: str) -> tuple[float, str]:
+        return (sum(_score(z[day]) for z in per_zone) / len(per_zone), day)
+
+    day = min(shared, key=key)
+    return {
+        zone: _pick(_best([c for c in cands if c.datetime == day]))
+        for zone, cands in by_zone.items()
+    }
+
+
 def coordinate_steps(
     candidates: dict[str, list[Candidate]],
     bins: list[str],
     max_offset_days: int | None,
+    single_date: bool = False,
 ) -> tuple[list[Step], list[str]]:
     """One step per interval in ``bins`` with a pick for every zone that has
     a candidate in it.
 
     ``candidates`` maps zone id -> its candidates (tagged with their
     ``bin``), in zone order. Returns (steps in time order, start dates of
-    intervals where no zone has any candidate).
+    intervals where no zone has any candidate). With ``single_date`` an
+    interval only gets a step if every zone has a scene on one shared day;
+    other intervals are returned as skipped too.
     """
+    if single_date and max_offset_days is not None:
+        raise ValueError("single_date and max_offset_days exclude each other")
     steps: list[Step] = []
     skipped: list[str] = []
     for bin_start in bins:
@@ -150,6 +177,13 @@ def coordinate_steps(
         }
         if not by_zone:
             skipped.append(bin_start)
+            continue
+        if single_date:
+            picks = _common_date(by_zone) if len(by_zone) == len(candidates) else None
+            if picks is None:
+                skipped.append(bin_start)
+                continue
+            steps.append(Step(bin=bin_start, picks=picks, window=None, empty_zones=[]))
             continue
         picks, window = _coordinate_bin(by_zone, max_offset_days)
         steps.append(

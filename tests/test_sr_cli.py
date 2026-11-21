@@ -179,7 +179,15 @@ def test_sr_command_reports_zone_timeseries_steps(
         "run_sr_timeseries_zones",
         lambda cfg, out, use_cache, run_dir: ZoneTimeseriesResult(
             out_dir=tmp_path,
-            steps=[ZoneStepResult(step, {}, tmp_path / "a.vrt", None)],
+            steps=[
+                ZoneStepResult(
+                    step,
+                    {},
+                    tmp_path / "lr.tif",
+                    tmp_path / "sr.tif",
+                    {"2024-01-03": (0.5, -0.25), "2024-01-25": None},
+                )
+            ],
             skipped_bins=["2024-02-01"],
         ),
     )
@@ -195,6 +203,7 @@ def test_sr_command_reports_zone_timeseries_steps(
     assert "z00_01 2024-01-25 (+8 d outside)" in out
     assert "spread 22 d" in out
     assert "2024-02-01" in out
+    assert "shift 2024-01-03 (+0.50, -0.25) px, 2024-01-25 dropped" in out
 
 
 def test_sr_command_writes_into_a_new_run_folder(

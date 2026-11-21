@@ -134,12 +134,26 @@ def _run(cfg: SrConfig, out_dir: str, use_cache: bool, run_dir: Path) -> None:
         )
         offset = cfg.sentinel.timeseries.max_zone_offset_days
         for step in series.steps:
-            print(describe_step(step.step, offset))
+            line = describe_step(step.step, offset)
+            if step.shifts:
+                line += " · shift " + ", ".join(
+                    f"{date} ({s[0]:+.2f}, {s[1]:+.2f}) px" if s else f"{date} dropped"
+                    for date, s in step.shifts.items()
+                )
+            if step.sr is None:
+                line += " · no SR (dropped by co-registration)"
+            print(line)
+        reason = (
+            "no day with a scene in every zone"
+            if cfg.sentinel.timeseries.single_date
+            else "no scene in any zone"
+        )
         for start in series.skipped_bins:
-            print(f"no scene in any zone for the interval starting {start}")
+            print(f"{reason} for the interval starting {start}")
         print(
             f"sr timeseries zones -> {series.out_dir} "
-            f"({len(series.steps)} step(s), steps.json lists dates and offsets)"
+            f"({len(series.steps)} step(s), steps.json lists dates, offsets and "
+            "shifts)"
         )
         return
     if zones:

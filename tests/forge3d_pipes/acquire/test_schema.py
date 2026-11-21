@@ -138,3 +138,26 @@ def test_negative_zone_offset_is_rejected():
     )
     with pytest.raises(ValueError, match="max_zone_offset_days"):
         OmegaConf.to_object(raw)
+
+
+def test_single_date_excludes_a_zone_offset():
+    raw = OmegaConf.merge(
+        _base(),
+        _required(),
+        {"sentinel": {"timeseries": {"single_date": True, "max_zone_offset_days": 3}}},
+    )
+    with pytest.raises(ValueError, match="single_date"):
+        OmegaConf.to_object(raw)
+
+
+def test_coreg_defaults_and_validation():
+    cfg = OmegaConf.to_object(OmegaConf.merge(_base(), _required()))
+    assert cfg.sentinel.timeseries.single_date is False
+    assert (cfg.sentinel.coreg.enabled, cfg.sentinel.coreg.anchor) == (True, "auto")
+    assert cfg.sentinel.coreg.grid_size == 7
+
+    raw = OmegaConf.merge(
+        _base(), _required(), {"sentinel": {"coreg": {"grid_size": 0}}}
+    )
+    with pytest.raises(ValueError, match="grid_size"):
+        OmegaConf.to_object(raw)

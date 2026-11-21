@@ -227,3 +227,28 @@ def test_dates_select_exactly_those_acquisitions(stubbed, tmp_path, capsys):
     assert result.scenes[1].path.name.startswith("superres_2023-05-20_")
     assert result.skipped_bins == []
     assert "no acquisition on 2023-03-01" in capsys.readouterr().out
+
+
+def test_lr_only_writes_native_scenes_and_scl_without_model(
+    stubbed, tmp_path, monkeypatch
+):
+    import rasterio
+
+    monkeypatch.setattr(
+        rgbn.mlstac, "load", lambda path: pytest.fail("lr_only must not load a model")
+    )
+    result = _export(tmp_path, dates=["2023-05-20"], lr_only=True)
+
+    [scene] = result.scenes
+    assert scene.path.name == (
+        "lr_2023-05-20_S2A_MSIL2A_20230520T103631_R008_T32ULE_20240901T000000.tif"
+    )
+    assert scene.scl_path == scene.path.with_name(scene.path.stem + "_scl.tif")
+    with rasterio.open(scene.path) as ds:
+        assert (ds.count, ds.width, ds.height, ds.res) == (2, 4, 4, (10.0, 10.0))
+        assert ds.crs.to_epsg() == 32632
+        assert ds.read().max() == pytest.approx(0.1)
+    with rasterio.open(scene.scl_path) as ds:
+        scl = ds.read(1)
+        assert ds.dtypes[0] == "uint8"
+        assert (scl == 9).sum() == 1 and (scl == 4).sum() == 15

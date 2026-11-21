@@ -83,8 +83,8 @@ def _wire(monkeypatch, *, empty=(), grid=GRID):
         )
         return scenes
 
-    def _build_vrt(tiles, dst):
-        calls.append(("build_vrt", [Path(t).name for t in tiles], dst))
+    def _build_vrt(tiles, dst, bounds=None):
+        calls.append(("build_vrt", [Path(t).name for t in tiles], dst, bounds))
         Path(dst).write_text("vrt")
         return Path(dst)
 
@@ -255,7 +255,9 @@ TS_CANDIDATES = {
 TS_BINS = ["2024-01-01", "2024-02-01", "2024-03-01"]
 
 
-def _wire_timeseries(monkeypatch):
+def _wire_timeseries(monkeypatch, *, drop=()):
+    """Stand-ins for the zoned timeseries: candidates, 10 m fetch (with SCL),
+    co-registration (dropping the dates in ``drop``) and whole-raster SR."""
     calls = _wire(monkeypatch)
 
     def _list_candidates(cfg, sentinel_sr_dir, lat, lon, out_dir):
@@ -271,17 +273,48 @@ def _wire_timeseries(monkeypatch):
         return read_candidates(out_dir)
 
     def _run_sentinel_sr(cfg, sentinel_sr_dir, lat, lon, out_dir, **kw):
-        calls.append(("run_sentinel_sr", lat, lon, kw.get("dates")))
+        calls.append(("run_sentinel_sr", lat, lon, kw.get("dates"), kw.get("lr_only")))
         out_dir.mkdir(parents=True, exist_ok=True)
         scenes = []
         for date in kw["dates"]:
-            path = out_dir / f"superres_{date}_x.tif"
+            path = out_dir / f"lr_{date}_x.tif"
             path.write_bytes(f"{lat},{lon},{date}".encode())
-            scenes.append(Scene(path, 1.0, date))
+            scl = out_dir / f"lr_{date}_x_scl.tif"
+            scl.write_bytes(b"scl")
+            scenes.append(Scene(path, 1.0, date, scl_path=scl))
         return scenes
+
+    def _run_sentinel_coreg(cfg, sentinel_sr_dir, jobs, jobs_path):
+        calls.append(("coreg", [(j["date"], Path(j["src"]).name) for j in jobs]))
+        report = []
+        for j in jobs:
+            if j["date"] in drop:
+                report.append(
+                    {**j, "dst": None, "shift_x_px": None, "shift_y_px": None}
+                )
+                continue
+            Path(j["dst"]).write_bytes(Path(j["src"]).read_bytes() + b"+cr")
+            report.append({**j, "shift_x_px": 0.5, "shift_y_px": -0.25})
+        return report
+
+    def _run_sentinel_superres(cfg, sentinel_sr_dir, jobs, jobs_path, overwrite=False):
+        calls.append(
+            ("superres", [(Path(j["src"]).name, Path(j["dst"]).name) for j in jobs])
+        )
+        for j in jobs:
+            Path(j["dst"]).parent.mkdir(parents=True, exist_ok=True)
+            Path(j["dst"]).write_bytes(b"sr:" + Path(j["src"]).read_bytes())
+
+    def _merge_first_valid(parts, dst):
+        calls.append(("merge", [Path(p).name for p in parts]))
+        Path(dst).write_bytes(b"merged")
+        return Path(dst)
 
     monkeypatch.setattr(pipeline, "list_sentinel_candidates", _list_candidates)
     monkeypatch.setattr(pipeline, "run_sentinel_sr", _run_sentinel_sr)
+    monkeypatch.setattr(pipeline, "run_sentinel_coreg", _run_sentinel_coreg)
+    monkeypatch.setattr(pipeline, "run_sentinel_superres", _run_sentinel_superres)
+    monkeypatch.setattr(pipeline, "merge_first_valid", _merge_first_valid)
     return calls
 
 
@@ -289,7 +322,9 @@ def _ts(**timeseries):
     return _sr_cfg(timeseries={"enabled": True, **timeseries})
 
 
-def test_zone_timeseries_shares_one_window_per_interval(monkeypatch, tmp_path):
+def test_zone_timeseries_fetches_10m_mosaics_coregisters_then_srs(
+    monkeypatch, tmp_path
+):
     calls = _wire_timeseries(monkeypatch)
 
     result = pipeline.run_sr_timeseries_zones(
@@ -301,51 +336,147 @@ def test_zone_timeseries_shares_one_window_per_interval(monkeypatch, tmp_path):
     # 01-28 window: mean (1 + 0) / 2 beats 01-03 (2 + 3 + 9) / 3 only if it
     # covered as many zones -- it doesn't, so all three share 01-03.
     assert {p.date for p in january.step.picks.values()} == {"2024-01-03"}
-    assert january.vrt == ts / "valley_sr_2024-01-03.vrt"
-    assert january.tiles["z01_00"] == ts / "z01_00" / "valley_sr_2024-01-03.tif"
+    assert january.tiles["z01_00"] == ts / "lr" / "z01_00" / "valley_lr_2024-01-03.tif"
     assert february.step.empty_zones == ["z01_00"]
     assert result.skipped_bins == ["2024-03-01"]
-    # Pass 2 asks each zone for exactly its chosen dates.
-    sr = {(c[1], c[2]): c[3] for c in calls if c[0] == "run_sentinel_sr"}
-    assert sr[(47.01, 11.01)] == ["2024-01-03", "2024-02-10"]
-    assert sr[(47.00, 11.01)] == ["2024-01-03"]
-    steps = json.loads((ts / "steps.json").read_text())
-    assert steps["max_zone_offset_days"] == 14
-    assert steps["steps"][0]["spread_days"] == 0
-    assert steps["steps"][1]["empty_zones"] == ["z01_00"]
-
-
-def test_zone_timeseries_without_offset_lets_zones_choose(monkeypatch, tmp_path):
-    _wire_timeseries(monkeypatch)
-
-    result = pipeline.run_sr_timeseries_zones(_ts(), tmp_path / "out")
-
-    january = result.steps[0].step
-    assert january.picks["z00_00"].date == "2024-01-28"
-    assert january.picks["z00_01"].date == "2024-01-03"
-    assert january.spread_days == 25
-    assert result.steps[0].vrt.name == "valley_sr_2024-01-03.vrt"
-
-
-def test_zone_timeseries_mosaic_per_step(monkeypatch, tmp_path):
-    calls = _wire_timeseries(monkeypatch)
-
-    result = pipeline.run_sr_timeseries_zones(
-        _sr_cfg(timeseries={"enabled": True}, zones={"enabled": True, "mosaic": True}),
-        tmp_path / "out",
-    )
-
-    ts = tmp_path / "out" / "valley_sr_timeseries"
-    assert [s.mosaic for s in result.steps] == [
-        ts / "valley_sr_2024-01-03.tif",
-        ts / "valley_sr_2024-02-10.tif",
+    # Pass 2 fetches each zone's chosen dates at 10 m, no SR per zone.
+    fetch = {(c[1], c[2]): c[3:] for c in calls if c[0] == "run_sentinel_sr"}
+    assert fetch[(47.01, 11.01)] == (["2024-01-03", "2024-02-10"], True)
+    assert fetch[(47.00, 11.01)] == (["2024-01-03"], True)
+    # Mosaics on the full zone grid, SCL alongside.
+    vrts = [c for c in calls if c[0] == "build_vrt"]
+    assert [Path(c[2]).name for c in vrts] == [
+        "valley_lr_2024-01-03.vrt",
+        "valley_lr_2024-01-03_scl.vrt",
+        "valley_lr_2024-02-10.vrt",
+        "valley_lr_2024-02-10_scl.vrt",
     ]
-    # The mosaics make the top folder a regular timeseries.
+    assert all(c[3] == GRID.bounds for c in vrts)
+    # One co-registration over the whole series, before SR.
+    names = [c[0] for c in calls]
+    assert names.index("coreg") < names.index("superres")
+    [coreg] = [c for c in calls if c[0] == "coreg"]
+    assert coreg[1] == [
+        ("2024-01-03", "valley_lr_2024-01-03.tif"),
+        ("2024-02-10", "valley_lr_2024-02-10.tif"),
+    ]
+    [superres] = [c for c in calls if c[0] == "superres"]
+    assert [src for src, _ in superres[1]] == [
+        "valley_lr_2024-01-03_cr.tif",
+        "valley_lr_2024-02-10_cr.tif",
+    ]
+    assert january.shifts == {"2024-01-03": (0.5, -0.25)}
+    assert january.sr == ts / "valley_sr_2024-01-03.tif"
+    assert january.sr.read_bytes() == b"sr:mosaic+cr"
+    # The SR mosaics make the folder a regular timeseries.
     assert list(pipeline.timeseries_frames("aoi/valley.gpkg", ts)) == [
         "2024-01-03",
         "2024-02-10",
     ]
-    assert len([c for c in calls if c[0] == "export_mosaic"]) == 2
+    steps = json.loads((ts / "steps.json").read_text())
+    assert steps["max_zone_offset_days"] == 14
+    assert steps["coreg"]["anchor"] == "auto"
+    assert steps["steps"][0]["spread_days"] == 0
+    assert steps["steps"][0]["coreg"] == {"2024-01-03": [0.5, -0.25]}
+    assert steps["steps"][0]["lr_mosaic"] == "lr/valley_lr_2024-01-03_cr.tif"
+    assert steps["steps"][1]["empty_zones"] == ["z01_00"]
+
+
+def test_zone_timeseries_without_offset_merges_date_parts(monkeypatch, tmp_path):
+    calls = _wire_timeseries(monkeypatch)
+
+    result = pipeline.run_sr_timeseries_zones(_ts(), tmp_path / "out")
+
+    january = result.steps[0]
+    assert january.step.picks["z00_00"].date == "2024-01-28"
+    assert january.step.picks["z00_01"].date == "2024-01-03"
+    assert january.step.spread_days == 25
+    # Each acquisition date is its own 10 m part with its own shift, merged
+    # after co-registration.
+    [coreg] = [c for c in calls if c[0] == "coreg"]
+    assert coreg[1][:2] == [
+        ("2024-01-03", "valley_lr_2024-01-03_part_2024-01-03.tif"),
+        ("2024-01-28", "valley_lr_2024-01-03_part_2024-01-28.tif"),
+    ]
+    merges = [c for c in calls if c[0] == "merge"]
+    assert merges[0][1] == [
+        "valley_lr_2024-01-03_part_2024-01-03_cr.tif",
+        "valley_lr_2024-01-03_part_2024-01-28_cr.tif",
+    ]
+    assert set(january.shifts) == {"2024-01-03", "2024-01-28"}
+    assert january.sr is not None and january.sr.name == "valley_sr_2024-01-03.tif"
+
+
+def test_zone_timeseries_single_date(monkeypatch, tmp_path):
+    calls = _wire_timeseries(monkeypatch)
+
+    result = pipeline.run_sr_timeseries_zones(_ts(single_date=True), tmp_path / "out")
+
+    # January: 01-03 is the only day all three zones share; February has no
+    # scene for z01_00, so no step.
+    [january] = result.steps
+    assert {p.date for p in january.step.picks.values()} == {"2024-01-03"}
+    assert result.skipped_bins == ["2024-02-01", "2024-03-01"]
+    # A single step can't be co-registered against anything.
+    assert [c for c in calls if c[0] == "coreg"] == []
+    assert january.shifts == {}
+    assert january.lr_mosaic is not None
+    assert january.lr_mosaic.name == "valley_lr_2024-01-03.tif"
+    steps = json.loads(
+        (tmp_path / "out" / "valley_sr_timeseries" / "steps.json").read_text()
+    )
+    assert steps["single_date"] is True
+
+
+def test_zone_timeseries_coreg_disabled(monkeypatch, tmp_path):
+    calls = _wire_timeseries(monkeypatch)
+
+    pipeline.run_sr_timeseries_zones(
+        _sr_cfg(
+            timeseries={"enabled": True, "max_zone_offset_days": 14},
+            coreg={"enabled": False},
+        ),
+        tmp_path / "out",
+    )
+
+    assert [c for c in calls if c[0] == "coreg"] == []
+    [superres] = [c for c in calls if c[0] == "superres"]
+    assert [src for src, _ in superres[1]] == [
+        "valley_lr_2024-01-03.tif",
+        "valley_lr_2024-02-10.tif",
+    ]
+
+
+def test_zone_timeseries_step_dropped_by_coreg_gets_no_sr(monkeypatch, tmp_path):
+    calls = _wire_timeseries(monkeypatch, drop={"2024-02-10"})
+
+    result = pipeline.run_sr_timeseries_zones(
+        _ts(max_zone_offset_days=14), tmp_path / "out"
+    )
+
+    january, february = result.steps
+    assert february.sr is None and february.lr_mosaic is None
+    assert february.shifts == {"2024-02-10": None}
+    [superres] = [c for c in calls if c[0] == "superres"]
+    assert len(superres[1]) == 1
+    steps = json.loads(
+        (tmp_path / "out" / "valley_sr_timeseries" / "steps.json").read_text()
+    )
+    assert steps["steps"][1]["coreg"] == {"2024-02-10": None}
+    assert steps["steps"][1]["sr"] is None
+
+
+def test_zone_timeseries_sr_is_cached_by_input(monkeypatch, tmp_path):
+    calls = _wire_timeseries(monkeypatch)
+    pipeline.run_sr_timeseries_zones(_ts(max_zone_offset_days=14), tmp_path / "out")
+    [first] = [c for c in calls if c[0] == "superres"]
+    calls.clear()
+
+    pipeline.run_sr_timeseries_zones(_ts(max_zone_offset_days=14), tmp_path / "out")
+
+    # Same mosaics -> same cache paths; sentinel_sr keeps existing outputs.
+    [second] = [c for c in calls if c[0] == "superres"]
+    assert second[1] == first[1]
 
 
 def test_zone_timeseries_reuses_candidates_across_offsets(monkeypatch, tmp_path):
@@ -354,6 +485,7 @@ def test_zone_timeseries_reuses_candidates_across_offsets(monkeypatch, tmp_path)
     calls.clear()
 
     pipeline.run_sr_timeseries_zones(_ts(max_zone_offset_days=3), tmp_path / "out")
+    pipeline.run_sr_timeseries_zones(_ts(single_date=True), tmp_path / "out")
 
     assert [c for c in calls if c[0] == "list_candidates"] == []
 
@@ -362,25 +494,36 @@ def test_zone_timeseries_reset_and_fill_gaps(monkeypatch, tmp_path):
     calls = _wire_timeseries(monkeypatch)
     out = tmp_path / "out"
     ts = out / "valley_sr_timeseries"
-    pipeline.run_sr_timeseries_zones(_ts(), out)
-    stale = ts / "z00_00" / "valley_sr_2023-06-01.tif"
+    pipeline.run_sr_timeseries_zones(_ts(max_zone_offset_days=14), out)
+    stale = ts / "valley_sr_2023-06-01.tif"
     stale.write_bytes(b"old")
+    stale_lr = ts / "lr" / "valley_lr_2023-06-01.tif"
+    stale_lr.write_bytes(b"old")
 
     # Without fill_gaps the folder is rebuilt: stale steps go.
-    pipeline.run_sr_timeseries_zones(_ts(), out)
-    assert not stale.exists()
+    pipeline.run_sr_timeseries_zones(_ts(max_zone_offset_days=14), out)
+    assert not stale.exists() and not stale_lr.exists()
 
-    # With fill_gaps finished intervals are kept and not chosen again.
+    # With fill_gaps finished intervals are kept and not chosen again, but
+    # their 10 m mosaics are co-registered with the series again.
     calls.clear()
-    result = pipeline.run_sr_timeseries_zones(_ts(fill_gaps=True), out)
+    result = pipeline.run_sr_timeseries_zones(
+        _ts(max_zone_offset_days=14, fill_gaps=True), out
+    )
     assert result.steps == []
-    assert len(json.loads((ts / "steps.json").read_text())["steps"]) == 2
     assert all(c[3] is None for c in calls if c[0] == "run_sentinel_sr")
+    [coreg] = [c for c in calls if c[0] == "coreg"]
+    assert [d for d, _ in coreg[1]] == ["2024-01-03", "2024-02-10"]
+    assert len(json.loads((ts / "steps.json").read_text())["steps"]) == 2
 
 
 def test_zone_timeseries_offset_keeps_the_cache_key():
     assert pipeline._cache_key(_ts()) == pipeline._cache_key(
         _ts(max_zone_offset_days=14)
+    )
+    assert pipeline._cache_key(_ts()) == pipeline._cache_key(_ts(single_date=True))
+    assert pipeline._cache_key(_ts()) == pipeline._cache_key(
+        _sr_cfg(timeseries={"enabled": True}, coreg={"anchor": "first"})
     )
 
 

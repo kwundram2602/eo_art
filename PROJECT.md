@@ -5,8 +5,16 @@
 - [ ] Run a real acquire and a forge3d render through the new Run tabs
 - [ ] dk_sk `render.yaml`: point `input.path`/overlay at `out/runs/latest-acquire/` after the next acquire
 - [ ] Real SR run with `sentinel.zones` on a 2×2 AOI: check the VRT and how forge3d handles many tile overlays
+- [ ] Real zoned SR timeseries (2×2 AOI, ~4 monthly steps, `single_date: true`): profile across a former zone border, shifts in `steps.json`, render as one overlay
+- [ ] Pin stac2cube in `sentinel_sr` to 5ffaffd (`uv add ... --rev`), blocked in session; `superres.py` does its own edge padding meanwhile
+- [ ] LR-first for `run_sr_zones` and acquire with zones too (one SR mosaic instead of per-zone tiles), then drop `zones.mosaic`
 
 ## Journal
+### 2026-11-22
+- Zoned SR timeseries now LR-first: 10 m per zone → mosaic per step on the full grid → AROSICS → SR over the whole mosaic with overlapping patches and edge padding, so zone borders leave no SR seam (`run_sr_timeseries_zones`, `sentinel_sr/{superres,coreg}.py`)
+- Co-registration via stac2cube's `coregister_cube` (consensus windows, cloud-aware placement, one cubic warp), `sentinel.coreg` block; shifts and dropped steps in `steps.json`; multi-date steps get one shift per acquisition date
+- `timeseries.single_date` added as the strict alternative to `max_zone_offset_days`: a step only on a day every zone has a scene (`zone_steps._common_date`)
+- AROSICS underestimates shifts several-fold on smooth texture (Gaussian σ≥2 noise: 2 px → 0.4 px); stac2cube's edge roughness is NaN below 3 scenes, so `iteration=auto` only from 3 steps on
 ### 2026-11-21
 - Acquire/SR results per run: `out/runs/<time>-<kind>/` with `config.yaml`, cache stays shared in `out/_acquire/`, `out/runs/latest-acquire|latest-sr` symlinks for render configs; app passes its log name as run id, Results grouped per run (`acquire/runs.py`, `results.result_groups`)
 - Zoned SR timeseries now shares one step per interval: candidates of all zones first (`--candidates-only`), dates chosen together within `timeseries.max_zone_offset_days`, zones without a scene in the window relaxed to the nearest one with the offset reported (`zone_steps.py`, `steps.json`); VRT and optional mosaic per step; `max_items` stays ignored for timeseries

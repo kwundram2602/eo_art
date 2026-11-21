@@ -55,6 +55,11 @@ class Timeseries:
     # scene in the best window takes its scene nearest to it, and the run
     # reports by how much. None: every zone takes its own least cloudy scene.
     max_zone_offset_days: int | None = None
+    # With sentinel.zones, the strict alternative to max_zone_offset_days:
+    # every step is one acquisition for the whole AOI. Per interval only days
+    # on which every zone has a scene (after the cloud checks) are eligible,
+    # the least cloudy of them wins; intervals without one get no step.
+    single_date: bool = False
 
     def __post_init__(self) -> None:
         if self.every < 1:
@@ -65,6 +70,11 @@ class Timeseries:
             raise ValueError(
                 "sentinel.timeseries.max_zone_offset_days must be >= 0, got "
                 f"{self.max_zone_offset_days}"
+            )
+        if self.single_date and self.max_zone_offset_days is not None:
+            raise ValueError(
+                "sentinel.timeseries.single_date and max_zone_offset_days exclude "
+                "each other: single_date allows no offset at all"
             )
 
 
@@ -87,6 +97,31 @@ class Zones:
     clip_to_aoi: bool = True
     # Besides the tiles and their VRT, write the mosaic as one GeoTIFF.
     mosaic: bool = False
+
+
+@dataclass
+class Coreg:
+    """AROSICS co-registration of a zoned timeseries (``eo-art-sr`` with
+    ``sentinel.zones`` and ``sentinel.timeseries``).
+
+    Runs on the 10 m step mosaics before SR (via stac2cube's consensus
+    matcher: many windows per scene, only where both scenes are cloud-free,
+    one cubic warp at the end). Steps it can't place reliably are dropped
+    and listed in steps.json.
+    """
+
+    enabled: bool = True
+    # Reference scene: auto (most textured low-cloud step in the middle of the
+    # series), first, composite (median of the first 30 days) or YYYY-MM-DD.
+    anchor: str = "auto"
+    # Matching windows per scene: up to grid_size^2 + 1.
+    grid_size: int = 7
+
+    def __post_init__(self) -> None:
+        if self.grid_size < 1:
+            raise ValueError(
+                f"sentinel.coreg.grid_size must be >= 1, got {self.grid_size}"
+            )
 
 
 @dataclass
@@ -129,6 +164,7 @@ class Sentinel:
     reference_index: int | None = None
     timeseries: Timeseries = field(default_factory=Timeseries)
     zones: Zones = field(default_factory=Zones)
+    coreg: Coreg = field(default_factory=Coreg)
 
     def __post_init__(self) -> None:
         if self.max_aoi_cloud is not None and not 0 <= self.max_aoi_cloud <= 100:
