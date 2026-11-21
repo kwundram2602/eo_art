@@ -104,3 +104,52 @@ def disjoint_overlay(tmp_path):
     ) as dst:
         dst.write(data, 1)
     return path
+
+
+# What sentinel_sr.rgbn.band_descriptions writes for the default 10-band SR
+# stack on Planetary Computer (shared common names get the band id appended).
+SR_DESCRIPTIONS = (
+    "blue",
+    "green",
+    "red",
+    "rededge_B05",
+    "rededge_B06",
+    "rededge_B07",
+    "nir",
+    "rededge_B8A",
+    "swir16",
+    "swir22",
+)
+
+
+@pytest.fixture
+def make_sr_tif():
+    """Factory for a small float32 10-band reflectance GeoTIFF like the SR
+    step's output: band ``i`` (0-based) holds ``0.02 * (i + 1)`` plus a
+    left-to-right ramp of up to 0.01, and pixel (0, 0) is NaN in every band."""
+
+    def make(path, descriptions=SR_DESCRIPTIONS):
+        width, height = 16, 8
+        ramp = np.linspace(0.0, 0.01, width, dtype="float32")
+        data = np.stack(
+            [np.tile(0.02 * (i + 1) + ramp, (height, 1)) for i in range(10)]
+        ).astype("float32")
+        data[:, 0, 0] = np.nan
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            width=width,
+            height=height,
+            count=10,
+            dtype="float32",
+            crs="EPSG:32632",
+            transform=from_origin(600000.0, 5200000.0, 2.5, 2.5),
+        ) as dst:
+            dst.write(data)
+            for i, description in enumerate(descriptions or (), start=1):
+                dst.set_band_description(i, description)
+        return path
+
+    return make
