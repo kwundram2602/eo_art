@@ -325,3 +325,25 @@ def test_run_acquire_stage_falls_back_to_configs_own_out_dir(monkeypatch, tmp_pa
 
     cli._run_acquire_stage(str(acquire_cfg), "cli_override", True)
     assert seen["out_dir"] == "cli_override"
+
+
+def test_acquire_stage_notes_that_timeseries_is_ignored(monkeypatch, tmp_path, capsys):
+    import eo_art.forge3d_pipes.acquire as acquire
+
+    monkeypatch.setattr(acquire, "run_acquire", lambda cfg, out_dir, use_cache: None)
+    acquire_cfg = tmp_path / "acquire.yaml"
+    acquire_cfg.write_text(
+        "aoi_path: aoi.gpkg\n"
+        "ee_project: ee-test\n"
+        "sentinel_sr_dir: ../sentinel_sr\n"
+        "sentinel:\n"
+        "  start_date: '2023-01-01'\n"
+        "  end_date: '2023-12-31'\n"
+        "  model_path: /m\n"
+        "  timeseries:\n"
+        "    enabled: true\n"
+    )
+
+    cli._run_acquire_stage(str(acquire_cfg), None, use_cache=True)
+
+    assert "acquire ignores sentinel.timeseries" in capsys.readouterr().out

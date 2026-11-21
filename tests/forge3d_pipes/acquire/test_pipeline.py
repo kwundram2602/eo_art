@@ -1,9 +1,12 @@
+import json
+from pathlib import Path
+
 import pytest
 from omegaconf import OmegaConf
 
 from eo_art.forge3d_pipes.acquire import pipeline
 from eo_art.forge3d_pipes.acquire.schema import AcquireConfig, SrConfig
-from eo_art.forge3d_pipes.acquire.sentinel_bridge import Scene
+from eo_art.forge3d_pipes.acquire.sentinel_bridge import MANIFEST_NAME, Scene
 
 
 def _cfg(**overrides):
@@ -31,7 +34,9 @@ def _wire(monkeypatch, tmp_path, *, scenes=(("scene0.tif", None),)):
         calls.append(("read_aoi_center", aoi_path))
         return 39.49, -0.43
 
-    def _run_sentinel_sr(sentinel_cfg, sentinel_sr_dir, lat, lon, out_dir):
+    def _run_sentinel_sr(
+        sentinel_cfg, sentinel_sr_dir, lat, lon, out_dir, overwrite=False
+    ):
         calls.append(("run_sentinel_sr", sentinel_sr_dir, lat, lon))
         out_dir = tmp_path / "sentinel_out"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -172,7 +177,7 @@ def test_default_treats_missing_cloud_cover_as_worst(monkeypatch, tmp_path):
 def test_no_scenes_written_raises(monkeypatch, tmp_path):
     calls = _wire(monkeypatch, tmp_path)
 
-    def _empty(sentinel_cfg, sentinel_sr_dir, lat, lon, out_dir):
+    def _empty(sentinel_cfg, sentinel_sr_dir, lat, lon, out_dir, overwrite=False):
         return []
 
     monkeypatch.setattr(pipeline, "run_sentinel_sr", _empty)
@@ -381,8 +386,24 @@ def test_run_sr_copies_lowest_cloud_scene_without_dem(monkeypatch, tmp_path):
     result = pipeline.run_sr(_sr_cfg(), tmp_path / "out", use_cache=False)
 
     assert [c[0] for c in calls] == ["read_aoi_center", "run_sentinel_sr"]
-    assert result == tmp_path / "out" / "optical_sr.tif"
+    assert result == tmp_path / "out" / "aoi_sr.tif"
     assert result.read_bytes() == b"scene"
+
+
+def test_run_sr_names_output_after_aoi(monkeypatch, tmp_path):
+    _wire(monkeypatch, tmp_path)
+
+    valley = pipeline.run_sr(
+        _sr_cfg(aoi_path="aoi/valley.gpkg"), tmp_path / "out", use_cache=False
+    )
+    ridge = pipeline.run_sr(
+        _sr_cfg(aoi_path="aoi/ridge.gpkg"), tmp_path / "out", use_cache=False
+    )
+
+    assert valley == tmp_path / "out" / "valley_sr.tif"
+    assert ridge == tmp_path / "out" / "ridge_sr.tif"
+    # Two AOIs sharing one out_dir no longer overwrite each other.
+    assert valley.exists() and ridge.exists()
 
 
 def test_run_sr_cache_hit_skips_sentinel(monkeypatch, tmp_path):
@@ -402,3 +423,258 @@ def test_run_sr_no_scenes_written_raises(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="no scenes"):
         pipeline.run_sr(_sr_cfg(), tmp_path / "out", use_cache=False)
+
+
+def test_run_sr_reuses_cache_written_before_per_aoi_naming(monkeypatch, tmp_path):
+    calls = _wire(monkeypatch, tmp_path)
+    cfg = _sr_cfg(aoi_path="aoi/valley.gpkg")
+    cache_dir = tmp_path / "out" / pipeline.CACHE_DIRNAME / pipeline._cache_key(cfg)
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "optical_sr.tif").write_bytes(b"old")
+
+    result = pipeline.run_sr(cfg, tmp_path / "out")
+
+    assert calls == []
+    assert result == tmp_path / "out" / "valley_sr.tif"
+    assert result.read_bytes() == b"old"
+
+
+def test_acquire_ignores_timeseries(monkeypatch, tmp_path):
+    _wire(monkeypatch, tmp_path)
+    seen = []
+    inner = pipeline.run_sentinel_sr
+
+    def _capture(sentinel_cfg, *args, **kwargs):
+        seen.append(sentinel_cfg)
+        return inner(sentinel_cfg, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "run_sentinel_sr", _capture)
+    cfg = _cfg(sentinel={"timeseries": {"enabled": True, "interval": "week"}})
+
+    pipeline.run_acquire(cfg, tmp_path / "out", use_cache=False)
+
+    assert seen[0].timeseries.enabled is False
+    assert pipeline._cache_key(cfg) == pipeline._cache_key(_cfg())
+
+
+def test_disabled_timeseries_keeps_the_sr_cache_key():
+    plain = _sr_cfg()
+    disabled = _sr_cfg(sentinel={"timeseries": {"interval": "week", "every": 3}})
+    enabled = _sr_cfg(sentinel={"timeseries": {"enabled": True}})
+
+    assert pipeline._cache_key(plain) == pipeline._cache_key(disabled)
+    assert pipeline._cache_key(plain) != pipeline._cache_key(enabled)
+
+
+def test_no_cache_asks_sentinel_sr_to_overwrite(monkeypatch, tmp_path):
+    _wire(monkeypatch, tmp_path)
+    seen = []
+    inner = pipeline.run_sentinel_sr
+
+    def _capture(*args, overwrite=False):
+        seen.append(overwrite)
+        return inner(*args, overwrite=overwrite)
+
+    monkeypatch.setattr(pipeline, "run_sentinel_sr", _capture)
+
+    pipeline.run_sr(_sr_cfg(), tmp_path / "out", use_cache=True)
+    pipeline.run_sr(_sr_cfg(), tmp_path / "out", use_cache=False)
+
+    assert seen == [False, True]
+
+
+def _ts_cfg(**timeseries):
+    return _sr_cfg(
+        aoi_path="aoi/valley.gpkg",
+        sentinel={"timeseries": {"enabled": True, **timeseries}},
+    )
+
+
+def _wire_timeseries(monkeypatch, scenes, skipped_bins=()):
+    """sentinel_sr stand-in that writes ``scenes`` ((date, cloud), ...) plus
+    its manifest into the directory it's given."""
+    calls = []
+
+    def _run_sentinel_sr(sentinel_cfg, sentinel_sr_dir, lat, lon, out_dir, **kw):
+        calls.append((sentinel_cfg, kw))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        entries = []
+        for date, cloud in scenes:
+            path = out_dir / f"superres_{date}_id.tif"
+            path.write_bytes(date.encode())
+            entries.append({"path": str(path), "cloud_cover": cloud, "datetime": date})
+        (out_dir / MANIFEST_NAME).write_text(
+            json.dumps({"scenes": entries, "skipped_bins": list(skipped_bins)})
+        )
+        return [
+            Scene(Path(e["path"]), e["cloud_cover"], e["datetime"]) for e in entries
+        ]
+
+    monkeypatch.setattr(pipeline, "read_aoi_center", lambda _: (1.0, 2.0))
+    monkeypatch.setattr(pipeline, "run_sentinel_sr", _run_sentinel_sr)
+    return calls
+
+
+def test_run_sr_timeseries_writes_one_dated_file_per_scene(monkeypatch, tmp_path):
+    calls = _wire_timeseries(
+        monkeypatch,
+        [("2023-03-02", 4.0), ("2023-01-05", 1.0)],
+        skipped_bins=["2023-02-01"],
+    )
+
+    result = pipeline.run_sr_timeseries(_ts_cfg(), tmp_path / "out")
+
+    assert result.out_dir == tmp_path / "out" / "valley_sr_timeseries"
+    assert [p.name for p in result.paths] == [
+        "valley_sr_2023-01-05.tif",
+        "valley_sr_2023-03-02.tif",
+    ]
+    assert result.paths[0].read_bytes() == b"2023-01-05"
+    assert result.skipped_bins == ["2023-02-01"]
+    assert calls[0][0].timeseries.enabled is True
+    assert calls[0][1] == {"overwrite": False, "skip_dates": ()}
+
+
+def test_run_sr_timeseries_cache_hit_skips_sentinel(monkeypatch, tmp_path):
+    calls = _wire_timeseries(monkeypatch, [("2023-01-05", 1.0)])
+    pipeline.run_sr_timeseries(_ts_cfg(), tmp_path / "out")
+
+    result = pipeline.run_sr_timeseries(_ts_cfg(), tmp_path / "out")
+
+    assert len(calls) == 1
+    assert [p.name for p in result.paths] == ["valley_sr_2023-01-05.tif"]
+
+
+def test_run_sr_timeseries_resumes_without_manifest(monkeypatch, tmp_path):
+    """A run that died halfway left scenes but no manifest: rerun sentinel_sr
+    (without overwrite, so it keeps what it already wrote)."""
+    calls = _wire_timeseries(monkeypatch, [("2023-01-05", 1.0)])
+    sentinel_dir = (
+        tmp_path / "out" / pipeline.CACHE_DIRNAME / pipeline._cache_key(_ts_cfg())
+    ) / "sentinel"
+    sentinel_dir.mkdir(parents=True)
+    (sentinel_dir / "superres_2023-01-05_id.tif").write_bytes(b"partial")
+
+    pipeline.run_sr_timeseries(_ts_cfg(), tmp_path / "out")
+
+    assert calls[0][1] == {"overwrite": False, "skip_dates": ()}
+
+
+def test_run_sr_timeseries_no_cache_overwrites(monkeypatch, tmp_path):
+    calls = _wire_timeseries(monkeypatch, [("2023-01-05", 1.0)])
+    pipeline.run_sr_timeseries(_ts_cfg(), tmp_path / "out")
+
+    pipeline.run_sr_timeseries(_ts_cfg(), tmp_path / "out", use_cache=False)
+
+    assert [kw for _, kw in calls] == [
+        {"overwrite": False, "skip_dates": ()},
+        {"overwrite": True, "skip_dates": ()},
+    ]
+
+
+def test_run_sr_timeseries_drops_stale_dates(monkeypatch, tmp_path):
+    _wire_timeseries(monkeypatch, [("2023-01-05", 1.0)])
+    target = tmp_path / "out" / "valley_sr_timeseries"
+    target.mkdir(parents=True)
+    (target / "valley_sr_2022-12-01.tif").write_bytes(b"old")
+    (target / "notes.txt").write_text("keep")
+
+    pipeline.run_sr_timeseries(_ts_cfg(), tmp_path / "out")
+
+    assert sorted(p.name for p in target.iterdir()) == [
+        "notes.txt",
+        "valley_sr_2023-01-05.tif",
+    ]
+
+
+def test_run_sr_timeseries_no_scenes_raises(monkeypatch, tmp_path):
+    _wire_timeseries(monkeypatch, [], skipped_bins=["2023-01-01"])
+
+    with pytest.raises(RuntimeError, match="no scenes"):
+        pipeline.run_sr_timeseries(_ts_cfg(), tmp_path / "out")
+
+
+def test_run_sr_and_run_sr_timeseries_reject_the_other_mode(tmp_path):
+    with pytest.raises(ValueError, match="run_sr_timeseries"):
+        pipeline.run_sr(_ts_cfg(), tmp_path)
+    with pytest.raises(ValueError, match="use run_sr"):
+        pipeline.run_sr_timeseries(_sr_cfg(), tmp_path)
+
+
+def test_max_items_only_counts_for_the_cache_key_without_timeseries():
+    assert pipeline._cache_key(
+        _sr_cfg(sentinel={"max_items": 3})
+    ) != pipeline._cache_key(_sr_cfg(sentinel={"max_items": 5}))
+    assert pipeline._cache_key(_ts_cfg()) == pipeline._cache_key(
+        _sr_cfg(
+            aoi_path="aoi/valley.gpkg",
+            sentinel={"max_items": 5, "timeseries": {"enabled": True}},
+        )
+    )
+
+
+def test_reference_prefers_aoi_cloud_over_tile_cloud(tmp_path):
+    hazy_tile_clear_aoi = Scene(tmp_path / "a.tif", cloud_cover=40.0, aoi_cloud=0.0)
+    clear_tile_cloudy_aoi = Scene(tmp_path / "b.tif", cloud_cover=1.0, aoi_cloud=8.0)
+
+    reference = pipeline._select_reference(
+        [clear_tile_cloudy_aoi, hazy_tile_clear_aoi], None
+    )
+
+    assert reference == tmp_path / "a.tif"
+
+
+def test_fill_gaps_keeps_existing_timesteps_and_skips_their_intervals(
+    monkeypatch, tmp_path
+):
+    calls = _wire_timeseries(monkeypatch, [("2023-03-02", 1.0)])
+    target = tmp_path / "out" / "valley_sr_timeseries"
+    target.mkdir(parents=True)
+    (target / "valley_sr_2023-01-05.tif").write_bytes(b"jan")
+    (target / "valley_sr_2023-02-14.tif").write_bytes(b"feb")
+    (target / "valley_sr_2023-02-14_indices.tif").write_bytes(b"not a frame")
+
+    result = pipeline.run_sr_timeseries(_ts_cfg(fill_gaps=True), tmp_path / "out")
+
+    assert calls[0][1] == {
+        "overwrite": False,
+        "skip_dates": ["2023-01-05", "2023-02-14"],
+    }
+    assert [p.name for p in result.added] == ["valley_sr_2023-03-02.tif"]
+    assert [p.name for p in result.paths] == [
+        "valley_sr_2023-01-05.tif",
+        "valley_sr_2023-02-14.tif",
+        "valley_sr_2023-03-02.tif",
+    ]
+    assert (target / "valley_sr_2023-01-05.tif").read_bytes() == b"jan"
+
+
+def test_fill_gaps_searches_again_despite_a_cached_manifest(monkeypatch, tmp_path):
+    calls = _wire_timeseries(monkeypatch, [])
+    target = tmp_path / "out" / "valley_sr_timeseries"
+    target.mkdir(parents=True)
+    (target / "valley_sr_2023-01-05.tif").write_bytes(b"jan")
+
+    first = pipeline.run_sr_timeseries(_ts_cfg(fill_gaps=True), tmp_path / "out")
+    second = pipeline.run_sr_timeseries(_ts_cfg(fill_gaps=True), tmp_path / "out")
+
+    # Nothing new is fine when there already are timesteps.
+    assert len(calls) == 2
+    assert first.added == second.added == []
+    assert [p.name for p in second.paths] == ["valley_sr_2023-01-05.tif"]
+
+
+def test_without_fill_gaps_only_frames_are_reset(monkeypatch, tmp_path):
+    _wire_timeseries(monkeypatch, [("2023-03-02", 1.0)])
+    target = tmp_path / "out" / "valley_sr_timeseries"
+    target.mkdir(parents=True)
+    (target / "valley_sr_2023-01-05.tif").write_bytes(b"old")
+    (target / "valley_sr_2023-01-05_indices.tif").write_bytes(b"keep")
+
+    result = pipeline.run_sr_timeseries(_ts_cfg(), tmp_path / "out")
+
+    assert sorted(p.name for p in target.iterdir()) == [
+        "valley_sr_2023-01-05_indices.tif",
+        "valley_sr_2023-03-02.tif",
+    ]
+    assert result.added == result.paths

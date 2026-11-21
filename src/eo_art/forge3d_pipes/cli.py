@@ -102,6 +102,11 @@ def _run_acquire_stage(acquire_config: str, out_dir: str | None, use_cache: bool
         OmegaConf.structured(AcquireConfig), OmegaConf.load(acquire_config)
     )
     cfg = cast(AcquireConfig, OmegaConf.to_object(raw))
+    if cfg.sentinel.timeseries.enabled:
+        print(
+            "note: acquire ignores sentinel.timeseries (it needs one reference "
+            "scene); run eo-art-sr for the timeseries"
+        )
     return run_acquire(cfg, out_dir or cfg.out_dir, use_cache=use_cache)
 
 

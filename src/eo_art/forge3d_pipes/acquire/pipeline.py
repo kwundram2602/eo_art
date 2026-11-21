@@ -2,8 +2,9 @@
 
 import hashlib
 import json
+import re
 import shutil
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from vecraspy import align_raster_grid, simulate_thermal_erosion, super_resolve_dtm
@@ -13,10 +14,13 @@ from eo_art.forge3d_pipes.acquire.schema import (
     DemSource,
     DtmMode,
     SrConfig,
+    Timeseries,
 )
 from eo_art.forge3d_pipes.acquire.sentinel_bridge import (
+    MANIFEST_NAME,
     Scene,
     read_aoi_center,
+    read_manifest,
     run_sentinel_sr,
 )
 from eo_art.forge3d_pipes.acquire.terrain import fetch_local_dem, fetch_terrain_dem
@@ -24,7 +28,11 @@ from eo_art.forge3d_pipes.acquire.terrain import fetch_local_dem, fetch_terrain_
 CACHE_DIRNAME = "_acquire"
 DTM_FILENAME = "dtm.tif"
 OPTICAL_FILENAME = "optical_aligned.tif"
-SR_FILENAME = "optical_sr.tif"
+SR_SUFFIX = "_sr.tif"
+TIMESERIES_SUFFIX = "_sr_timeseries"
+# Name inside the per-config cache dir (already unique per AOI via the hash);
+# unchanged so caches written before outputs were named per AOI stay valid.
+CACHED_SR_FILENAME = "optical_sr.tif"
 
 
 @dataclass(frozen=True)
@@ -33,11 +41,29 @@ class AcquireResult:
     optical_path: Path
 
 
+@dataclass(frozen=True)
+class TimeseriesResult:
+    out_dir: Path
+    # Every timestep in out_dir, one GeoTIFF per interval, in time order.
+    paths: list[Path]
+    # Start dates of intervals without any scene.
+    skipped_bins: list[str]
+    # The timesteps this run wrote (all of `paths` unless filling gaps).
+    added: list[Path] = field(default_factory=list)
+
+
 def _cache_key(cfg: AcquireConfig | SrConfig) -> str:
     # out_dir says where to store results, not what to compute -- excluded so
     # moving the output location doesn't invalidate an otherwise-identical
     # cached result (or, worse, silently redo an expensive GPU+network run).
     payload = {k: v for k, v in asdict(cfg).items() if k != "out_dir"}
+    # Acquire ignores the timeseries block, and a disabled one changes nothing:
+    # leaving it out keeps caches written before the field existed valid.
+    if isinstance(cfg, AcquireConfig) or not cfg.sentinel.timeseries.enabled:
+        del payload["sentinel"]["timeseries"]
+    else:
+        # Ignored by a timeseries run (see run_sentinel_sr).
+        del payload["sentinel"]["max_items"]
     blob = json.dumps(payload, sort_keys=True, default=str).encode()
     return hashlib.sha256(blob).hexdigest()[:16]
 
@@ -52,14 +78,15 @@ def _select_reference(scenes: list[Scene], reference_index: int | None) -> Path:
             )
         return scenes[reference_index].path
 
-    # Scenes with no cloud_cover metadata (some collections lack the eo
-    # extension) sort last rather than winning by default.
+    # The AOI's own SCL cloud share beats the tile-wide eo:cloud_cover.
+    # Scenes with neither (some collections lack the eo extension) sort last
+    # rather than winning by default.
+    def cloud(scene: Scene) -> float | None:
+        return scene.aoi_cloud if scene.aoi_cloud is not None else scene.cloud_cover
+
     return min(
         scenes,
-        key=lambda scene: (
-            scene.cloud_cover is None,
-            scene.cloud_cover if scene.cloud_cover is not None else 0.0,
-        ),
+        key=lambda scene: (cloud(scene) is None, cloud(scene) or 0.0),
     ).path
 
 
@@ -85,8 +112,15 @@ def run_acquire(
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         lat, lon = read_aoi_center(cfg.aoi_path)
+        # Acquire needs one reference scene, never a timeseries.
+        sentinel = replace(cfg.sentinel, timeseries=Timeseries())
         written = run_sentinel_sr(
-            cfg.sentinel, cfg.sentinel_sr_dir, lat, lon, cache_dir / "sentinel"
+            sentinel,
+            cfg.sentinel_sr_dir,
+            lat,
+            lon,
+            cache_dir / "sentinel",
+            overwrite=not use_cache,
         )
         if not written:
             raise RuntimeError(
@@ -148,24 +182,38 @@ def run_acquire(
     return AcquireResult(dtm_path=final_dtm, optical_path=final_optical)
 
 
+def sr_filename(aoi_path: str | Path) -> str:
+    """``aoi/valley.gpkg`` -> ``valley_sr.tif``, so SR runs for different
+    AOIs sharing one out_dir don't overwrite each other's result."""
+    return f"{Path(aoi_path).stem}{SR_SUFFIX}"
+
+
 def run_sr(cfg: SrConfig, out_dir: str | Path, use_cache: bool = True) -> Path:
-    """Run only the Sentinel SR step and return ``<out_dir>/optical_sr.tif``.
+    """Run only the Sentinel SR step and return ``<out_dir>/<aoi>_sr.tif``.
 
     The reference scene (lowest cloud cover, or ``sentinel.reference_index``)
     is cached under ``<out_dir>/_acquire/<hash>`` like ``run_acquire``'s
     outputs; the full set of SR timesteps stays next to it in ``sentinel/``.
+    For ``sentinel.timeseries.enabled`` use ``run_sr_timeseries``.
     """
+    if cfg.sentinel.timeseries.enabled:
+        raise ValueError("sentinel.timeseries is enabled; use run_sr_timeseries")
     out_dir = Path(out_dir)
     cache_dir = out_dir / CACHE_DIRNAME / _cache_key(cfg)
-    cached_sr = cache_dir / SR_FILENAME
-    final_sr = out_dir / SR_FILENAME
+    cached_sr = cache_dir / CACHED_SR_FILENAME
+    final_sr = out_dir / sr_filename(cfg.aoi_path)
 
     if not (use_cache and cached_sr.exists()):
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         lat, lon = read_aoi_center(cfg.aoi_path)
         written = run_sentinel_sr(
-            cfg.sentinel, cfg.sentinel_sr_dir, lat, lon, cache_dir / "sentinel"
+            cfg.sentinel,
+            cfg.sentinel_sr_dir,
+            lat,
+            lon,
+            cache_dir / "sentinel",
+            overwrite=not use_cache,
         )
         if not written:
             raise RuntimeError(
@@ -178,3 +226,90 @@ def run_sr(cfg: SrConfig, out_dir: str | Path, use_cache: bool = True) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(cached_sr, final_sr)
     return final_sr
+
+
+def timeseries_dirname(aoi_path: str | Path) -> str:
+    """``aoi/valley.gpkg`` -> ``valley_sr_timeseries``."""
+    return f"{Path(aoi_path).stem}{TIMESERIES_SUFFIX}"
+
+
+def timeseries_frames(aoi_path: str | Path, folder: Path) -> dict[str, Path]:
+    """Date -> timestep GeoTIFF (``<aoi>_sr_<YYYY-MM-DD>.tif``) in ``folder``.
+
+    Other rasters saved there (e.g. ``..._indices.tif``) aren't timesteps.
+    """
+    pattern = re.compile(
+        rf"{re.escape(Path(aoi_path).stem)}{SR_SUFFIX.removesuffix('.tif')}"
+        r"_(\d{4}-\d{2}-\d{2})"
+    )
+    frames = {}
+    for path in folder.glob("*.tif"):
+        match = pattern.fullmatch(path.stem)
+        if match:
+            frames[match.group(1)] = path
+    return dict(sorted(frames.items()))
+
+
+def run_sr_timeseries(
+    cfg: SrConfig, out_dir: str | Path, use_cache: bool = True
+) -> TimeseriesResult:
+    """SR one scene per ``sentinel.timeseries`` interval into
+    ``<out_dir>/<aoi>_sr_timeseries/<aoi>_sr_<YYYY-MM-DD>.tif``.
+
+    The SR scenes and sentinel_sr's manifest are cached under
+    ``<out_dir>/_acquire/<hash>/sentinel``; a run that died halfway left no
+    manifest, so the next run reruns sentinel_sr, which keeps the scenes it
+    already wrote and only processes the rest.
+
+    With ``timeseries.fill_gaps`` the output folder is the source of truth:
+    sentinel_sr always runs, but skips intervals that already hold a
+    timestep there, and new timesteps are added next to the existing ones.
+    """
+    timeseries = cfg.sentinel.timeseries
+    if not timeseries.enabled:
+        raise ValueError("sentinel.timeseries is disabled; use run_sr")
+    out_dir = Path(out_dir)
+    sentinel_dir = out_dir / CACHE_DIRNAME / _cache_key(cfg) / "sentinel"
+    target = out_dir / timeseries_dirname(cfg.aoi_path)
+    existing = timeseries_frames(cfg.aoi_path, target) if target.exists() else {}
+
+    # Filling gaps always searches again: an open interval may have a usable
+    # scene now (longer date range, relaxed cloud limits, new acquisitions).
+    if timeseries.fill_gaps or not (
+        use_cache and (sentinel_dir / MANIFEST_NAME).exists()
+    ):
+        lat, lon = read_aoi_center(cfg.aoi_path)
+        run_sentinel_sr(
+            cfg.sentinel,
+            cfg.sentinel_sr_dir,
+            lat,
+            lon,
+            sentinel_dir,
+            overwrite=not use_cache,
+            skip_dates=list(existing) if timeseries.fill_gaps else (),
+        )
+    manifest = read_manifest(sentinel_dir)
+    if not manifest.scenes and not (timeseries.fill_gaps and existing):
+        raise RuntimeError(
+            f"sentinel_sr wrote no scenes for aoi={cfg.aoi_path!r} "
+            f"in [{cfg.sentinel.start_date}, {cfg.sentinel.end_date}]"
+        )
+
+    stem = Path(cfg.aoi_path).stem
+    if not timeseries.fill_gaps:
+        # Drop dates from an earlier run with other settings, so the folder
+        # holds exactly this timeseries.
+        for stale in existing.values():
+            stale.unlink()
+    target.mkdir(parents=True, exist_ok=True)
+    added = []
+    for scene in sorted(manifest.scenes, key=lambda s: s.datetime or ""):
+        dst = target / f"{stem}_sr_{scene.datetime}.tif"
+        shutil.copy2(scene.path, dst)
+        added.append(dst)
+    return TimeseriesResult(
+        out_dir=target,
+        paths=list(timeseries_frames(cfg.aoi_path, target).values()),
+        skipped_bins=manifest.skipped_bins,
+        added=added,
+    )

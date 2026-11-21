@@ -26,6 +26,36 @@ class DtmMode(Enum):
     native = "native"
 
 
+class Interval(Enum):
+    day = "day"
+    week = "week"
+    month = "month"
+    year = "year"
+
+
+@dataclass
+class Timeseries:
+    """SR-only (``eo-art-sr``): keep one scene per interval instead of a single
+    reference scene. ``run_acquire`` ignores this block."""
+
+    enabled: bool = False
+    interval: Interval = Interval.month
+    # One scene every `every` intervals (e.g. interval=week, every=2: biweekly).
+    every: int = 1
+    # Fill up out/<aoi>_sr_timeseries/ instead of rebuilding it: intervals that
+    # already hold a timestep there are skipped, the open ones are searched
+    # again on every run (e.g. after extending end_date or relaxing
+    # max_aoi_cloud), and existing timesteps are never removed. Off: the folder
+    # is reset to exactly this config's series.
+    fill_gaps: bool = False
+
+    def __post_init__(self) -> None:
+        if self.every < 1:
+            raise ValueError(
+                f"sentinel.timeseries.every must be >= 1, got {self.every}"
+            )
+
+
 @dataclass
 class Sentinel:
     start_date: str = MISSING
@@ -47,15 +77,31 @@ class Sentinel:
     edge_size: int = 128
     resolution: int = 10
     stac: str = "https://planetarycomputer.microsoft.com/api/stac/v1"
+    # Cap on the scenes to super-resolve; ignored when timeseries.enabled,
+    # where the interval decides how many scenes there are.
     max_items: int | None = None
     max_cloud_cover: float | None = None
+    # AOI-level cloud check on the L2A scene classification (SCL): scenes with
+    # more than this percent of AOI pixels in `scl_cloud_classes` are dropped,
+    # and the rest are ranked by it. eo:cloud_cover (above) only describes the
+    # whole ~100 km tile. None disables the check.
+    max_aoi_cloud: float | None = 10.0
+    # 8 = cloud medium probability, 9 = cloud high probability; add 3 (cloud
+    # shadow), 10 (thin cirrus) or 0/1 (no data/defective) to be stricter.
+    scl_cloud_classes: tuple[int, ...] = (8, 9)
     # Which of the (possibly many) super-resolved timesteps to carry forward
     # into the DEM/DTM-SR/align steps. None (default) auto-selects the scene
     # with the lowest eo:cloud_cover; set explicitly to pick by position
     # instead.
     reference_index: int | None = None
+    timeseries: Timeseries = field(default_factory=Timeseries)
 
     def __post_init__(self) -> None:
+        if self.max_aoi_cloud is not None and not 0 <= self.max_aoi_cloud <= 100:
+            raise ValueError(
+                "sentinel.max_aoi_cloud must be a percentage in [0, 100], "
+                f"got {self.max_aoi_cloud}"
+            )
         if self.reference_index is not None and self.reference_index < 0:
             raise ValueError(
                 f"sentinel.reference_index must be >= 0, got {self.reference_index}"

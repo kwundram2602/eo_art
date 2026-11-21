@@ -9,11 +9,11 @@ imported directly.
 
 import json
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import geopandas as gpd
-
 from vecraspy import get_aoi_center
 
 from eo_art.forge3d_pipes.acquire.schema import Sentinel
@@ -25,6 +25,34 @@ MANIFEST_NAME = "manifest.json"
 class Scene:
     path: Path
     cloud_cover: float | None
+    # Acquisition date (YYYY-MM-DD).
+    datetime: str | None = None
+    # Percent of AOI pixels in the SCL cloud classes (None: check disabled).
+    aoi_cloud: float | None = None
+
+
+@dataclass(frozen=True)
+class Manifest:
+    scenes: list[Scene]
+    # Timeseries runs: start dates of intervals that had no scene.
+    skipped_bins: list[str]
+
+
+def read_manifest(out_dir: str | Path) -> Manifest:
+    """The scene list ``sentinel_sr`` writes next to its GeoTIFFs."""
+    manifest = json.loads((Path(out_dir) / MANIFEST_NAME).read_text())
+    return Manifest(
+        scenes=[
+            Scene(
+                path=Path(scene["path"]),
+                cloud_cover=scene["cloud_cover"],
+                datetime=scene.get("datetime"),
+                aoi_cloud=scene.get("aoi_cloud"),
+            )
+            for scene in manifest["scenes"]
+        ],
+        skipped_bins=manifest.get("skipped_bins", []),
+    )
 
 
 def read_aoi_center(aoi_path: str | Path) -> tuple[float, float]:
@@ -41,8 +69,15 @@ def run_sentinel_sr(
     lat: float,
     lon: float,
     out_dir: str | Path,
+    overwrite: bool = False,
+    skip_dates: Sequence[str] = (),
 ) -> list[Scene]:
-    """Run the sentinel_sr subprocess and return the written GeoTIFF paths."""
+    """Run the sentinel_sr subprocess and return the written GeoTIFF paths.
+
+    sentinel_sr keeps GeoTIFFs already in ``out_dir`` (resuming an interrupted
+    run) unless ``overwrite``. ``cfg.timeseries`` switches it to one scene per
+    interval; intervals containing one of ``skip_dates`` get none.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -75,15 +110,29 @@ def run_sentinel_sr(
         "--out",
         str(out_dir),
     ]
-    if cfg.max_items is not None:
+    # A timeseries has one scene per interval; max_items would cut it short.
+    if cfg.max_items is not None and not cfg.timeseries.enabled:
         command += ["--max-items", str(cfg.max_items)]
     if cfg.max_cloud_cover is not None:
         command += ["--max-cloud-cover", str(cfg.max_cloud_cover)]
+    if cfg.max_aoi_cloud is not None:
+        command += [
+            "--max-aoi-cloud",
+            str(cfg.max_aoi_cloud),
+            "--scl-classes",
+            ",".join(str(c) for c in cfg.scl_cloud_classes),
+        ]
+    if cfg.timeseries.enabled:
+        command += [
+            "--interval",
+            cfg.timeseries.interval.value,
+            "--every",
+            str(cfg.timeseries.every),
+        ]
+    if skip_dates:
+        command += ["--skip-dates", ",".join(skip_dates)]
+    if overwrite:
+        command.append("--overwrite")
 
     subprocess.run(command, check=True)
-
-    manifest = json.loads((out_dir / MANIFEST_NAME).read_text())
-    return [
-        Scene(path=Path(scene["path"]), cloud_cover=scene["cloud_cover"])
-        for scene in manifest["scenes"]
-    ]
+    return read_manifest(out_dir).scenes

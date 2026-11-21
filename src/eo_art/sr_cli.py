@@ -11,7 +11,7 @@ from typing import cast
 
 from omegaconf import DictConfig, OmegaConf
 
-from eo_art.forge3d_pipes.acquire import SrConfig, run_sr
+from eo_art.forge3d_pipes.acquire import SrConfig, run_sr, run_sr_timeseries
 
 SR_KEYS = ("aoi_path", "out_dir", "sentinel_sr_dir", "sentinel")
 
@@ -56,6 +56,16 @@ def load_sr_config(config: str, overrides: Sequence[str] = ()) -> SrConfig:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     cfg = load_sr_config(args.config, args.overrides)
-    path: Path = run_sr(cfg, args.out or cfg.out_dir, use_cache=not args.no_cache)
+    out_dir = args.out or cfg.out_dir
+    if cfg.sentinel.timeseries.enabled:
+        result = run_sr_timeseries(cfg, out_dir, use_cache=not args.no_cache)
+        for start in result.skipped_bins:
+            print(f"no scene for the interval starting {start}")
+        print(
+            f"sr timeseries -> {result.out_dir} "
+            f"({len(result.added)} new, {len(result.paths)} total)"
+        )
+        return 0
+    path: Path = run_sr(cfg, out_dir, use_cache=not args.no_cache)
     print(f"sr -> {path}")
     return 0

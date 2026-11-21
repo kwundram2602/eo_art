@@ -2,7 +2,12 @@ import pytest
 from omegaconf import OmegaConf
 from omegaconf.errors import MissingMandatoryValue
 
-from eo_art.forge3d_pipes.acquire.schema import AcquireConfig, DemSource, DtmMode
+from eo_art.forge3d_pipes.acquire.schema import (
+    AcquireConfig,
+    DemSource,
+    DtmMode,
+    Interval,
+)
 
 
 def _base():
@@ -86,3 +91,24 @@ def test_ee_project_optional_for_local_source():
     assert cfg.ee_project is None
     assert cfg.dem.source is DemSource.local
     assert cfg.dem.path == "dem.tif"
+
+
+def test_timeseries_defaults_off():
+    cfg = OmegaConf.to_object(OmegaConf.merge(_base(), _required()))
+    assert cfg.sentinel.timeseries.enabled is False
+    assert cfg.sentinel.timeseries.interval is Interval.month
+    assert cfg.sentinel.timeseries.every == 1
+
+
+def test_timeseries_every_must_be_positive():
+    required = _required()
+    required["sentinel"]["timeseries"] = {"enabled": True, "every": 0}
+    with pytest.raises(ValueError, match="every must be >= 1"):
+        OmegaConf.to_object(OmegaConf.merge(_base(), required))
+
+
+def test_max_aoi_cloud_is_a_percentage():
+    required = _required()
+    required["sentinel"]["max_aoi_cloud"] = 120
+    with pytest.raises(ValueError, match="max_aoi_cloud"):
+        OmegaConf.to_object(OmegaConf.merge(_base(), required))
